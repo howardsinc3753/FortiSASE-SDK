@@ -1,0 +1,76 @@
+config system global
+  set hostname "${hostname}"
+  set admin-sport 10443
+  set timezone 12
+end
+
+config system admin
+  edit "admin"
+    set password "${admin_password}"
+  next
+end
+
+config system interface
+  edit "port1"
+    set alias "WAN1"
+    set mode static
+    set ip ${wan1_ip} ${wan1_mask}
+    set allowaccess ping https ssh fgfm
+    set role wan
+  next
+  edit "port2"
+    set alias "WAN2"
+    set mode static
+    set ip ${wan2_ip} ${wan2_mask}
+    set allowaccess ping https ssh fgfm
+    set role wan
+  next
+  edit "port3"
+    set alias "LAN"
+    set mode static
+    set ip ${lan_ip} ${lan_mask}
+    set allowaccess ping https ssh
+    set role lan
+  next
+end
+
+# Both circuits active (equal distance) so the box is reachable on either EIP
+# BEFORE the full BOR SD-WAN config is pasted.
+config router static
+  edit 1
+    set gateway ${wan1_gw}
+    set device "port1"
+    set distance 20
+  next
+  edit 2
+    set gateway ${wan2_gw}
+    set device "port2"
+    set distance 20
+  next
+end
+
+config system dns
+  set primary 8.8.8.8
+  set secondary 8.8.4.4
+end
+
+# Minimal LAN-out policy (NAT) so a LAN client can reach the internet pre-BOR.
+config firewall policy
+  edit 1
+    set name "LAN-out"
+    set srcintf "port3"
+    set dstintf "port1" "port2"
+    set srcaddr "all"
+    set dstaddr "all"
+    set action accept
+    set schedule "always"
+    set service "ALL"
+    set nat enable
+  next
+end
+
+config system central-management
+  set type fortimanager
+  set fmg "forticloud"
+  set include-default-servers enable
+end

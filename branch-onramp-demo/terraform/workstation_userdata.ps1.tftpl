@@ -1,0 +1,19 @@
+<powershell>
+# Windows browser-workstation bootstrap. Runs once at first boot (as SYSTEM).
+$ErrorActionPreference = "Continue"
+
+# Lab login for RDP-over-SSM (Administrator + a known password).
+net user Administrator "${admin_password}"
+
+# Enable Remote Desktop + its firewall rule (needed for the SSM port-forward).
+Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+# Make sure the SSM agent stays up (preinstalled on Windows Server AMIs).
+Set-Service -Name AmazonSSMAgent -StartupType Automatic
+Start-Service AmazonSSMAgent -ErrorAction SilentlyContinue
+
+# Edge is already installed on Windows Server 2022. Drop a note on the desktop.
+$note = "Browser test box behind the Branch On-Ramp.`r`nOpen Edge and browse - traffic egresses via the FortiGate -> BOR -> FortiSASE.`r`nUse this to complete the SSO captive portal."
+Set-Content -Path "C:\Users\Public\Desktop\READ-ME.txt" -Value $note
+</powershell>

@@ -1,0 +1,537 @@
+{# ==========================================================================
+   BOR + SPA HUB — DUAL-CIRCUIT (dual-ISP) FortiOS config template (Jinja2)
+   INTERIM design (Daniel 2026-08-22): DUAL-circuit BOR on-ramps (4 cross-mesh
+   tunnels, one pair per WAN) + the PROVEN single-circuit SPA hub, with ONE
+   SASE_Hub dial-up bound to WAN1. The 2nd SASE_Hub2 on WAN2 is deliberately
+   TABLED — two SPA connections on one VDOM overlap the spokes' subnets inside
+   FortiSASE; the clean dual-SPA needs BGP-on-loopback + Service-Connection
+   priority (under research, per-overlay can't use the single-SC backup overlay).
+   CAVEAT: a WAN1 outage drops the SPA fabric (east-west via THIS hub) until WAN1
+   recovers; the hub's OWN internet (BOR on-ramps) survives via WAN2, and spokes'
+   own SIA is unaffected.
+   BOR side is EGRESS-ONLY (hub does NOT peer BGP over the on-ramps -> SNAT on
+   LAN->BOR internet); BGP = SASE_Hub route-reflector only. Dependency order is
+   identical to the single-circuit hub (bor-spa.conf.j2).
+   Context adds vs bor-spa: wan2_port, wan2_ip/mask/gateway, and per-pop circuit
+   (1|2) + network_id (the cross-mesh pops_dual). SASE_Hub member = pops|length+3
+   (two underlay members now: WAN1 + WAN2).
+   ========================================================================== #}
+config system global
+    set hostname "{{ hostname }}"
+    set alias "{{ device_alias }}"
+    set timezone "{{ timezone }}"
+    set admin-sport {{ admin_sport }}
+    set admintimeout {{ admintimeout }}
+    set gui-auto-upgrade-setup-warning disable
+end
+config system admin
+    edit "admin"
+        set password "{{ admin_password }}"
+    next
+end
+{% if controlled_firmware %}config system fortiguard
+    set auto-firmware-upgrade disable
+end
+{% endif %}
+{% if green_field %}
+{# ZTP factory cleanup - run FIRST. Console / MGMT / FMG pre-run only. #}
+config firewall policy
+    purge
+y
+end
+{% if platform == 'fgt-120g' %}
+{# 120G: LAN port16 is a member of the factory "lan" soft-switch; clear members FIRST, then delete
+   (a switch / its DHCP server with members won't purge). Factory IDs: dhcp server 1, switch "lan".
+   Bare 'y' answers each purge prompt on a console paste; drop them if pushing via FMG. #}
+config system dhcp server
+    edit 1
+        config ip-range
+            purge
+y
+        end
+    next
+    delete 1
+end
+config system virtual-switch
+    edit "lan"
+        config port
+            purge
+y
+        end
+    next
+    delete "lan"
+end
+{% elif platform != 'vm' %}config system dhcp server
+    purge
+y
+end
+config firewall address
+    delete "lan"
+end
+config system virtual-switch
+    purge
+y
+end
+{% endif %}{% endif %}
+{# Dual-circuit: wan_port=WAN1, wan2_port=WAN2, lan_port=LAN (+ optional loopback). SASE_Hub
+   binds to WAN1 only; the on-ramps cross-mesh across both WANs. #}
+config system interface
+    edit "{{ wan_port }}"
+        set alias "WAN1"
+{% if wan_mode == 'static' %}        set ip {{ wan_ip }} {{ wan_mask }}
+{% else %}        set mode dhcp
+        set distance {{ wan_dhcp_distance | default(20) }}
+{% endif %}        set allowaccess ping https ssh fgfm
+        set role wan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+    edit "{{ wan2_port }}"
+        set alias "WAN2"
+{% if wan_mode == 'static' %}        set ip {{ wan2_ip }} {{ wan2_mask }}
+{% else %}        set mode dhcp
+        set distance {{ wan_dhcp_distance | default(20) }}
+{% endif %}        set allowaccess ping https ssh fgfm
+        set role wan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+    edit "{{ lan_port }}"
+        set alias "LAN"
+        set ip {{ lan_ip }} {{ lan_mask }}
+        set allowaccess ping https ssh
+        set role lan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+{% if hub_loopback %}    edit "SASE_Hub_Lo"
+        set ip {{ hub_loopback }} 255.255.255.255
+        set allowaccess ping
+        set type loopback
+        set vdom root
+    next
+{% endif %}end
+
+{# LAN system zone: wrap the LAN port so policies reference "LAN_ZONE", not the raw port.
+   Named "LAN_ZONE" to match the BOR spoke templates (one convention everywhere). intrazone
+   allow lets future VLAN sub-interfaces in the zone reach each other without a per-pair policy. #}
+config system zone
+    edit "LAN_ZONE"
+        set interface "{{ lan_port }}"
+        set intrazone allow
+    next
+end
+
+{# phase1 CREATES SASE_Hub (dial-up, WAN1) + the 4 cross-mesh BOR_* tunnels. Each on-ramp
+   binds to its circuit's WAN and carries its own network-id (same PoP FQDN, 2 tunnel-configs). #}
+config vpn ipsec phase1-interface
+    edit "SASE_Hub"
+        set type dynamic
+        set interface "{{ wan_port }}"
+        set ike-version 2
+        set peertype any
+        set net-device disable
+        set mode-cfg enable
+        set add-route disable
+        set dpd on-idle
+        set dpd-retryinterval 60
+        set dhgrp 20 15 14
+        set network-overlay enable
+        set network-id {{ fabric_network_id }}
+        set transport auto
+        set ipv4-start-ip {{ fabric_pool_start }}
+        set ipv4-end-ip {{ fabric_pool_end }}
+        set ipv4-netmask 255.255.255.0
+        set proposal {{ hub_proposal }}
+        set psksecret {{ seed_psk }}
+    next
+{% for pop in pops %}{% set pwan = wan_port if pop.circuit == 1 else wan2_port %}    edit "BOR_{{ pop.name }}"
+        set type ddns
+        set interface "{{ pwan }}"
+        set ike-version 2
+        set peertype any
+        set net-device disable
+        set mode-cfg enable
+        set proposal {{ onramp_proposal }}
+        set dhgrp {{ onramp_dhgrp }}
+        set network-overlay enable
+        set network-id {{ pop.network_id | default(loop.index) }}
+        set transport auto
+        set fortinet-esp enable
+        set dpd on-idle
+        set remotegw-ddns "{{ pop.fqdn }}"
+        set psksecret {{ seed_psk }}
+    next
+{% endfor %}end
+
+config vpn ipsec phase2-interface
+    edit "SASE_Hub"
+        set phase1name "SASE_Hub"
+        set proposal aes256-sha256 aes256gcm
+        set dhgrp 20 15 14
+        set keylifeseconds 86400
+    next
+{% for pop in pops %}    edit "BOR_{{ pop.name }}"
+        set phase1name "BOR_{{ pop.name }}"
+        set proposal {{ onramp_proposal }}
+        set dhgrp {{ onramp_dhgrp }}
+    next
+{% endfor %}end
+
+{# SASE_Hub tunnel IP — set AFTER phase1 created the interface #}
+config system interface
+    edit "SASE_Hub"
+        set ip {{ fabric_hub_ip }} 255.255.255.255
+        set remote-ip {{ fabric_hub_remote }} 255.255.255.0
+        set allowaccess ping
+    next
+end
+
+config firewall address
+    edit "{{ hostname }}-LAN"
+        set subnet {{ lan_subnet }} {{ lan_mask }}
+    next
+{% if hub_loopback %}    edit "SASE_Hub-Loopback"
+        set subnet {{ hub_loopback }} 255.255.255.255
+    next
+{% endif %}{% for pop in pops %}    edit "BOR_{{ pop.name }}_PUBLIC"
+        set type fqdn
+        set allow-routing enable
+        set fqdn "{{ pop.fqdn }}"
+    next
+{% endfor %}    edit "RFC1918_10"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+    edit "RFC1918_172"
+        set subnet 172.16.0.0 255.240.0.0
+    next
+    edit "RFC1918_192"
+        set subnet 192.168.0.0 255.255.0.0
+    next
+end
+
+{# EGRESS-ONLY BOR side: dual floating defaults (WAN1+WAN2) + per-circuit PoP-public routes;
+   NO /32 to BOR nodes (the hub does NOT peer BGP over the on-ramps). #}
+config router static
+    edit 1
+{% if wan_mode == 'static' %}        set gateway {{ wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set distance 20
+        set device "{{ wan_port }}"
+        set comment "WAN1 floating default (fallback; SIA default via on-ramps)"
+    next
+    edit 2
+{% if wan_mode == 'static' %}        set gateway {{ wan2_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set distance 20
+        set device "{{ wan2_port }}"
+        set comment "WAN2 floating default (fallback; SIA default via on-ramps)"
+    next
+{% for pop in pops %}{% set pwan = wan_port if pop.circuit == 1 else wan2_port %}{% set pgw = wan_gateway if pop.circuit == 1 else wan2_gateway %}    edit {{ 20 + loop.index0 }}
+        set dstaddr "BOR_{{ pop.name }}_PUBLIC"
+{% if wan_mode == 'static' %}        set gateway {{ pgw }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ pwan }}"
+        set comment "{{ pop.name }} BOR PoP public via {{ pwan }}"
+    next
+{% endfor %}    edit 10
+        set dst {{ bastion_ip }} {{ bastion_mask }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway or wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan_port }}"
+        set comment "Bastion / management return path (via WAN1)"
+    next
+    edit 11
+        set dst {{ bastion_ip }} {{ bastion_mask }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway2 or wan2_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan2_port }}"
+        set comment "Bastion / management return path (via WAN2)"
+    next
+{% for net in trusted_host_routes %}    edit {{ 30 + loop.index0 }}
+        set dst {{ net }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway or wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan_port }}"
+        set comment "Extra trusted-host return route ({{ loop.index }})"
+    next
+{% endfor %}end
+
+{# CANONICAL return-path steering: map EVERY on-ramp community AS:(10k) -> a distinct local-pref,
+   independent of this hub's own pop count. Community-lists keyed by the community value (not pop
+   name) so they're identical everywhere. Catch-all is 999 (last) - never a mid-list 99. #}
+{% if bgp_communities %}config router community-list
+{% for k in range(1, hub_lp_slots + 1) %}    edit "CL_ONRAMP_{{ k }}"
+        config rule
+            edit 1
+                set action permit
+                set match "{{ bgp_as }}:{{ 10 * k }}"
+            next
+        end
+    next
+{% endfor %}    edit "CL_ONRAMP_FAIL"
+        config rule
+            edit 1
+                set action permit
+                set match "{{ fail_community }}"
+            next
+        end
+    next
+end
+config router route-map
+    edit "RM_FABRIC_IN"
+        config rule
+{% for k in range(1, hub_lp_slots + 1) %}            edit {{ 100 + k }}
+                set match-community "CL_ONRAMP_{{ k }}"
+                set set-local-preference {{ 200 - (k - 1) * 5 }}
+                set set-priority {{ 100 + (k - 1) * 5 }}
+            next
+{% endfor %}            edit 190
+                set match-community "CL_ONRAMP_FAIL"
+                set set-local-preference 50
+                set set-priority 300
+            next
+            edit 999
+            next
+        end
+    next
+end
+{% endif %}
+{# BGP route-reflector for the SPA fabric (PoPs = RR clients). SASE_Hub only — the BOR
+   on-ramps are egress-only and do NOT peer BGP. #}
+config router bgp
+    set as {{ bgp_as }}
+    set router-id {{ router_id }}
+    set keepalive-timer {{ bgp_keepalive }}
+    set holdtime-timer {{ bgp_holdtime }}
+    set ibgp-multipath enable
+    set additional-path enable
+    set additional-path-select 4
+    set graceful-restart enable
+    config neighbor-group
+        edit "SASE_Hub"
+            set interface "SASE_Hub"
+            set remote-as {{ bgp_as }}
+            set route-reflector-client enable
+{% if bgp_communities %}            set route-map-in "RM_FABRIC_IN"
+{% endif %}            set next-hop-self enable
+            set additional-path send
+            set adv-additional-path 4
+            set capability-graceful-restart enable
+            set link-down-failover enable
+            set soft-reconfiguration enable
+        next
+    end
+    config neighbor-range
+        edit 1
+            set prefix {{ fabric_overlay_ip }} 255.255.255.0
+            set neighbor-group "SASE_Hub"
+        next
+    end
+    config network
+        edit 1
+            set prefix {{ fabric_overlay_ip }} 255.255.255.0
+        next
+        edit 2
+            set prefix {{ lan_subnet }} {{ lan_mask }}
+        next
+{% if hub_loopback %}        edit 3
+            set prefix {{ hub_loopback }} 255.255.255.255
+        next
+{% endif %}{% for net in advertised_networks %}        edit {{ loop.index + 3 }}
+            set prefix {{ net }}
+        next
+{% endfor %}    end
+end
+
+config system sdwan
+    set status enable
+    config zone
+        edit "SDWAN_ZONE"
+        next
+        edit "Underlay_ZONE"
+        next
+    end
+    config members
+{% for pop in pops %}        edit {{ loop.index }}
+            set interface "BOR_{{ pop.name }}"
+            set zone "SDWAN_ZONE"
+        next
+{% endfor %}        edit {{ pops|length + 1 }}
+            set interface "{{ wan_port }}"
+            set zone "Underlay_ZONE"
+{% if wan_mode == 'static' %}            set gateway {{ wan_gateway }}
+{% endif %}        next
+        edit {{ pops|length + 2 }}
+            set interface "{{ wan2_port }}"
+            set zone "Underlay_ZONE"
+{% if wan_mode == 'static' %}            set gateway {{ wan2_gateway }}
+{% endif %}        next
+        {# SASE_Hub MUST be an SD-WAN member so the Private-Access service rule can steer
+           east-west RFC1918 out the fabric. Member = pops|length+3 (two underlays now). #}
+        edit {{ pops|length + 3 }}
+            set interface "SASE_Hub"
+            set zone "SDWAN_ZONE"
+        next
+    end
+    {# health-check members MUST be explicit = the on-ramp members (1..N). An empty/defaulted
+       'members' becomes 0 (all members) and the SD-WAN service rule won't steer. Keep in
+       lock-step with the INET_via_BOR service priority-members below. #}
+    config health-check
+        edit "SIA_Health"
+            {# probe the SASE-CONFIRMED targets (sla_probe_pool[:2] = 64.6.64.6/.65.6), NOT the
+               8.8.8.8/1.1.1.1 fallbacks — some public resolvers don't answer through the SASE egress. #}
+            set server {% for s in sla_probe_pool[:2] %}"{{ s }}" {% endfor %}
+
+            set failtime 2
+            set recoverytime 3
+            set update-static-route disable
+            set members {% for pop in pops %}{{ loop.index }} {% endfor %}
+
+            config sla
+                edit 1
+                    set link-cost-factor latency jitter packet-loss
+                    set latency-threshold {{ sla_latency_threshold }}
+                    set jitter-threshold {{ sla_jitter_threshold }}
+                    set packetloss-threshold {{ sla_packetloss_threshold }}
+                next
+            end
+        next
+    end
+end
+
+config firewall policy
+    {# (1) Spoke-to-spoke east-west hairpin. SASE_Hub is an SD-WAN member of SDWAN_ZONE, so this
+       is SDWAN_ZONE->SDWAN_ZONE (intrazone). NO NAT: the far spoke's LAN is BGP-known via the
+       fabric, so the real source must be preserved. #}
+    edit 1
+        set name "SDWAN-Hairpin (spoke-to-spoke)"
+        set srcintf "SDWAN_ZONE"
+        set dstintf "SDWAN_ZONE"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+    {# (2)+(3) LAN -> fabric/on-ramps SPLIT by destination (first hit wins, PRIVATE before INTERNET):
+         (2) PRIVATE, NO NAT: east-west RFC1918 rides the BGP-peered SASE_Hub fabric.
+         (3) INTERNET, NAT: SIA via the EGRESS-ONLY BOR on-ramps (no BGP -> PoPs never learn the hub
+             LAN, so hub-LAN internet MUST be SNAT'd behind the on-ramp tunnel IP). #}
+    edit 2
+        set name "LAN to BOR Private (east-west, no SNAT)"
+        set srcintf "LAN_ZONE"
+        set dstintf "SDWAN_ZONE"
+        set srcaddr "{{ hostname }}-LAN"
+        set dstaddr "RFC1918_10" "RFC1918_172" "RFC1918_192"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+    edit 3
+        set name "LAN to BOR Internet (SIA, SNAT)"
+        set srcintf "LAN_ZONE"
+        set dstintf "SDWAN_ZONE"
+        set srcaddr "{{ hostname }}-LAN"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat enable
+        set logtraffic all
+    next
+    {# (4)+(5) Return + hub-local reachability. SASE_Hub is in SDWAN_ZONE -> srcintf = SDWAN_ZONE. #}
+    edit 4
+        set name "BOR to LAN (return)"
+        set srcintf "SDWAN_ZONE"
+        set dstintf "LAN_ZONE"
+        set srcaddr "all"
+        set dstaddr "{{ hostname }}-LAN"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+{% if hub_loopback %}    edit 5
+        set name "BOR to Loopback"
+        set srcintf "SDWAN_ZONE"
+        set dstintf "SASE_Hub_Lo"
+        set srcaddr "all"
+        set dstaddr "SASE_Hub-Loopback"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+{% endif %}    edit 6
+        set name "LAN to Underlay (fallback)"
+        set srcintf "LAN_ZONE"
+        set dstintf "Underlay_ZONE"
+        set srcaddr "{{ hostname }}-LAN"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat enable
+        set logtraffic all
+    next
+end
+
+{% if shaper_up_mbps and shaper_up_mbps|int > 0 %}
+{# Per-site BW allocation (shared pool). SHARED shaper on the on-ramp tunnels caps this hub's
+   OWN internet (via on-ramps) in AGGREGATE; the SASE_Hub fabric relay is NOT shaped here. #}
+config firewall shaper traffic-shaper
+    edit "{{ shaper_up_mbps }}_MBPS_UP"
+        set guaranteed-bandwidth 0
+        set maximum-bandwidth {{ shaper_up_kbps }}
+        set bandwidth-unit kbps
+    next
+    edit "{{ shaper_down_mbps }}_MBPS_DOWN"
+        set guaranteed-bandwidth 0
+        set maximum-bandwidth {{ shaper_down_kbps }}
+        set bandwidth-unit kbps
+    next
+end
+config firewall shaping-policy
+    edit 1
+        set name "BOR_OUTBOUND_SHAPER"
+        set service "ALL"
+        set srcaddr "all"
+        set dstaddr "all"
+        set dstintf "SDWAN_ZONE"
+        set traffic-shaper "{{ shaper_up_mbps }}_MBPS_UP"
+        set traffic-shaper-reverse "{{ shaper_down_mbps }}_MBPS_DOWN"
+    next
+end
+{% endif %}
+{# SD-WAN service rules LAST. Underlay_fallback has NO 'set gateway/default enable' — the floating
+   statics (distance 20) own fallback. Private-Access FIRST (first-hit-wins) or the dst-all INET
+   rule shadows it. SASE_Hub member = pops|length+3; both underlays = pops|length+1 / +2. #}
+config system sdwan
+    config service
+        edit 1
+            set name "Private-Access"
+            set dst "RFC1918_10" "RFC1918_172" "RFC1918_192"
+            set priority-members {{ pops|length + 3 }}
+            set tie-break fib-best-match
+        next
+        edit 2
+            set name "INET_via_BOR"
+            set mode priority
+            set dst "all"
+            set health-check "SIA_Health"
+            set link-cost-factor packet-loss
+            {# cfg-order breaks equal-quality ties toward Primary1 (member 1); with the cross-mesh
+               pops_dual order (Primary1,Primary2,Secondary1,Secondary2) this also keeps the hub's
+               OWN internet on the same PoP across a single-WAN loss. #}
+            set tie-break cfg-order
+            set priority-members {% for pop in pops %}{{ loop.index }} {% endfor %}
+
+        next
+        edit 5
+            set name "Underlay_fallback"
+            set dst "all"
+            set priority-members {{ pops|length + 1 }} {{ pops|length + 2 }}
+        next
+    end
+end

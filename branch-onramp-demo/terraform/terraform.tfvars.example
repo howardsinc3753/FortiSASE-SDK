@@ -1,0 +1,52 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Defaults cover a 2-VM PoC.
+
+# --- Required ---
+admin_password = "CHANGE-ME-strong"     # FortiGate admin password (8+ chars)
+admin_cidr     = "203.0.113.10/32"      # YOUR public IP /32  (curl ifconfig.me) — don't leave 0.0.0.0/0
+
+# --- Optional overrides (defaults shown) ---
+# key_pair_name     = ""                 # optional — FortiGate login is the admin password; leave empty if no key pair
+# admin_sport       = 10443              # HTTPS admin GUI port. Keep off 443 — IKE-over-TCP (on-ramp) uses 443 and RSTs the GUI
+# extra_admin_cidrs = ["198.51.100.7/32"]  # extra IPs allowed to GUI/SSH (coworkers). Or set admin_cidr = "0.0.0.0/0" to open to ALL (demo only)
+# mgmt_return_cidr  = ""                 # trusted MGMT subnet pinned out the WAN so admin survives the on-ramp's injected
+#                                        # default route. Empty = reuse admin_cidr. Set to the PARTNER's mgmt subnet if it
+#                                        # differs from admin_cidr (e.g. "10.0.0.0/8"). See README "Management survives the tunnel".
+# aws_region        = "us-east-1"
+# availability_zone = "us-east-1a"
+# aws_profile       = ""                 # set + uncomment provider profile in versions.tf for SSO accounts
+# fortios_version   = "7.6.7"
+# architecture      = "arm64"            # arm64 -> t4g.* ; x86_64 -> t3/c5.*
+# instance_type     = "t4g.medium"       # 4 GiB min — t4g.small/2 GiB wedges the GUI (conserve mode)
+# project_name      = "sase-spoke"
+# vpc_cidr          = "10.200.0.0/16"
+
+# Two spokes with UNIQUE LAN subnets (add/remove to change VM count):
+# spokes = {
+#   "spoke-1" = { wan_cidr = "10.200.1.0/24", lan_cidr = "10.200.10.0/24" }
+#   "spoke-2" = { wan_cidr = "10.200.2.0/24", lan_cidr = "10.200.20.0/24" }
+# }
+
+# Optional: bake FortiFlex tokens in (else apply manually with `execute vm-license <token>`)
+# flex_tokens = { "spoke-1" = "FLEX-TOKEN-1", "spoke-2" = "FLEX-TOKEN-2" }
+
+# --- Test clients (opt-in): clientless Linux endpoints in each LAN ---
+# Simulate unmanaged/IoT devices behind the branch FGT (no FortiClient) — used
+# to test SASE SSO captive-portal auth, clientless WAN connectivity, site-to-site
+# flows, and BW throughput. Reached via SSM Session Manager (no public IP).
+# deploy_test_clients       = true
+# clients_per_lan           = 3          # 3 VMs per LAN (.100/.101/.102)
+# test_client_instance_type = "t4g.small" # BW headroom; t4g.micro=cheaper, t4g.medium=sustained multi-Gbps
+# enable_ssm_endpoints      = true        # ~$22/mo standing; false = SSM egresses via the FGT (portal will gate it)
+#
+# COST heads-up: clients_per_lan x #spokes VMs. 3 x 3 spokes = 9 x t4g.small.
+# Stop them when idle, or lower clients_per_lan, to protect the shared budget.
+#
+# No-bypass enforcement (ON by default):
+#  - route_intersite_via_fgt=true pins cross-site (different-LAN) traffic to the
+#    FortiGates -> BOR/SPA tunnels (more-specific-than-VPC-local routes).
+#  - the per-site client SG denies SAME-SUBNET peer traffic (routing can't force
+#    intra-subnet flows through a middlebox, so we fail-closed and deny them).
+# Together: no client-to-client path bypasses FortiOS/BOR/SASE.
+# Set false ONLY to deliberately test the direct AWS path (review the plan —
+# route_intersite_via_fgt modifies the live LAN route tables).
+# route_intersite_via_fgt = false

@@ -1,0 +1,21 @@
+FortiSASE BOR/SPA Config Generator & Automation SDK
+Copyright 2026 Daniel Howard (Fortinet SE, MSSP)
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+-------------------------------------------------------------------------------
+Trademark / affiliation notice
+-------------------------------------------------------------------------------
+This project automates and integrates with Fortinet products, including
+FortiSASE, FortiManager, and FortiGate / FortiOS. "Fortinet", "FortiSASE",
+"FortiManager", "FortiGate", and "FortiOS" are trademarks or registered
+trademarks of Fortinet, Inc. They are used here for identification and
+descriptive purposes only.
+
+This is an independent automation reference. It is NOT an official Fortinet
+product or release, and it is not endorsed by or affiliated with Fortinet, Inc.
+in an official capacity.

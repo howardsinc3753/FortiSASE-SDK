@@ -1,0 +1,41 @@
+# Secrets & credentials — NEVER commit
+*_credentials.yaml
+credentials.yaml
+secrets/
+.env
+.env.*
+!.env.test
+*.lic
+*.token
+*token*.json
+
+# FortiSASE / FortiCloud exports that may embed tenant data — sanitize before committing
+api/openapi/*-raw.json
+*_tenant_export.json
+
+# Raw FortiGate device backups & console diag — embed encrypted PSKs + full tenant
+# topology. Keep local; only sanitized templates/schemas belong in the repo.
+automation/sdwan-ztp/builds/**/raw/
+automation/sdwan-ztp/builds/**/diag/
+
+# Terraform state & vars (may contain tokens)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Internal continuity docs — machine-map / kickoff prompt, not partner-facing
+handoff/

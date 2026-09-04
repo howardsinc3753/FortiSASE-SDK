@@ -1,0 +1,17 @@
+# BOR Node — values file for the generator. Edit, then:
+#   python generator.py --values examples/site-bor.yaml   > my-site.conf
+role: bor
+platform: fgt-50g            # vm | fgt-30g | fgt-50g | fgt-71f
+hostname: spoke-9
+device_alias: FortiGate-50G
+wan_mode: static             # static | dhcp   (dhcp: omit wan_ip/mask/gateway)
+wan_ip: 192.168.209.30
+wan_mask: 255.255.255.0
+wan_gateway: 192.168.209.62
+lan_ip: 10.90.90.1
+lan_mask: 255.255.255.0
+router_id: 10.30.1.190       # unique in 10.30.1.0/24 (avoid .1-.6)
+admin_password: FortiSASE-OnRamp-2026!
+seed_psk: <TUNNEL_PSK>
+# optional extra LAN/VLANs to advertise (CIDR):
+# advertised_networks: ["10.91.0.0/24", "10.92.0.0/24"]

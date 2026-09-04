@@ -1,0 +1,643 @@
+# =============================================================================
+# BOR / BOR+SPA CONFIG-GENERATOR — VARIABLE SCHEMA   (Phase 0 · v0.1 · DRAFT)
+# =============================================================================
+# SINGLE SOURCE OF TRUTH. Drives BOTH:
+#   1) config rendering  (schema + Jinja2 template -> .conf)
+#   2) the SE web form   (Streamlit walks this file to build inputs + validation)
+#
+# MACD: every variable is a self-contained entry under `variables:` — add / edit /
+# remove freely; the form and the templates follow. Nothing is hard-coded twice.
+#
+# Extracted from the committed golden configs:
+#   BOR      -> Finalized-Template/bor-spoke.conf  (+ site-1/site-2 instances)
+#   BOR+SPA  -> Finalized-Template/site-5_bor-spa-hub.conf
+#   BGP tags -> Finalized-Template/Send-Communities/
+#
+# SCOPE model (this is what keeps the SE form short):
+#   tenant   = entered ONCE per FortiSASE tenant  (AS, PoPs, SLA, timers, crypto)
+#   site     = entered per device                 (hostname, WAN/LAN, router-id)
+#   secret   = never stored; injected at deploy   (PSKs, admin pw)
+#   derived  = computed, never prompted           (subnet, fabric pool, obj names)
+#   const    = fixed baseline, never prompted      (mtu, dpd, ike-version, ...)
+# =============================================================================
+
+meta:
+  version: 0.2
+  status: DRAFT-for-review
+  roles: [bor, bor-spa]           # bor = BOR Node (spoke) · bor-spa = BOR + SPA Hub
+  # FortiOS DEPENDENCY ORDER — the generator MUST emit sections in this exact order.
+  # Tunnels are created by ipsec phase1, so nothing that references a tunnel
+  # (interface tweaks, static, bgp, sdwan) may come before it. SD-WAN rules last.
+  emit_order:
+    - system_global_admin_fortiguard_settings
+    - system_interface_PHYSICAL_only            # wan/lan (+ loopback for hub) — NOT tunnels
+    - system_zone_LAN                            # LAN_ZONE (interface zone)
+    - ipsec_phase1_interface                     # <-- CREATES the ONRAMP / SASE_Hub tunnels
+    - ipsec_phase2_interface
+    - system_interface_TUNNEL_tweaks             # hub only: SASE_Hub tunnel IP (after phase1)
+    - firewall_address
+    - router_static
+    - router_bgp
+    - bgp_communities_prefixlist_routemap        # if features.bgp_communities (single block)
+    - system_sdwan_zones_members_healthcheck     # SD-WAN zones needed by firewall policy
+    - firewall_policy
+    - firewall_shaper_and_shaping_policy         # per-site BW cap on SDWAN_ZONE (needs the zone)
+    - system_sdwan_service_RULES_LAST            # SD-WAN service rules — emitted LAST
+
+# -----------------------------------------------------------------------------
+# PLATFORM PORT-MAPS  — model -> logical port names. A model is ONLY a port map;
+# all BGP/IPsec/SD-WAN logic is identical across models.
+# -----------------------------------------------------------------------------
+# wan2_port / lan_port_dual are used ONLY for the dual-circuit (dual-ISP) role.
+# vm dual: port1=WAN1, port2=WAN2, port3=LAN. 30G/50G dual: repurpose lan3 as WAN2, LAN stays lan1.
+platforms:
+  vm:       { wan_port: port1, lan_port: port2, wan2_port: port2, lan_port_dual: port3 }
+  fgt-30g:  { wan_port: wan,   lan_port: lan1,  wan2_port: lan3,  lan_port_dual: lan1 }
+  fgt-50g:  { wan_port: wan,   lan_port: lan1,  wan2_port: lan3,  lan_port_dual: lan1 }
+  fgt-71f:  { wan_port: wan1,  lan_port: internal, wan2_port: wan2, lan_port_dual: internal }
+  fgt-120g: { wan_port: port1, lan_port: port16, wan2_port: port2, lan_port_dual: port16 }  # LAN port16 = factory "lan" switch member (green-field deletes the switch)
+
+# -----------------------------------------------------------------------------
+# TENANT PoPs — the FortiSASE Branch On-Ramps this tenant rides. One block per
+# PoP. Drives: on-ramp interface names, FQDN address objects, phase1 remotegw,
+# static routes, BGP neighbors (BOR role), and community tags. Add a PoP by
+# copying a block. Names are GENERIC (Primary/Secondary) so the tunnel-interface identity
+# is constant across every customer; the PoP-specific part is the FQDN (which encodes the
+# real city, e.g. -dfw- = Dallas). FortiSASE has many PoPs — pick any by editing the FQDN.
+# -----------------------------------------------------------------------------
+# POC simplification (Daniel 2026-07): ONE seed PSK across ALL tunnels/sites
+# (see `seed_psk` variable). Not security-best-practice — fine for POC; a partner
+# offering this as a service swaps to per-PoP/per-device PSKs later.
+pops:
+  - id: primary
+    name: Primary                                      # -> interface "BOR_Primary" (generic; rename freely per customer)
+    fqdn: ipsec-<tenant>-dfw-f3.prod.fortisase.com     # EXAMPLE (Dallas) — each customer's PoP FQDN is unique
+    bor_node: 172.16.0.1                               # iBGP peer + /32 static (BOR role)
+    community: "65001:10"                              # preferred path (hub local-pref 200)
+  - id: secondary
+    name: Secondary                                    # -> interface "BOR_Secondary" (generic; rename freely)
+    fqdn: ipsec-<tenant>-mia-f3.prod.fortisase.com     # EXAMPLE (Miami)
+    bor_node: 172.16.8.1
+    community: "65001:20"                              # backup path (hub local-pref 100)
+    # probe: 10.100.0.53                               # OPTIONAL: pin THIS overlay's SLA probe (e.g. internal DNS
+    #                                                    reachable through the PoP). Omit -> auto-assign a unique
+    #                                                    pingable IP from sla_probe_pool by PoP order.
+
+# -----------------------------------------------------------------------------
+# DUAL-CIRCUIT (dual-ISP) PoPs — cross-mesh, ordered for VOICE / session keep-alive.
+# 2 PoPs x 2 tunnel-configs = 4 tunnels; each PoP reachable on BOTH circuits.
+#   circuit 1 = WAN1 (wan_port) · circuit 2 = WAN2 (wan2_port)
+# ORDER = STAY-ON-POP: the list groups a PoP's two tunnels together —
+#   Primary1 > Primary2 > Secondary1 > Secondary2 — so losing ONE circuit fails to the
+# SAME PoP's OTHER circuit (a voice/session stays anchored) and only a FULL PoP outage
+# moves to the Secondary PoP. Preference (priority-members) AND local-pref (community->lp
+# at the hub) BOTH follow this list order, so the forward and return paths stay SYMMETRIC
+# on the same PoP through a circuit failure. Communities :10/:20/:30/:40 -> lp 200/195/190/185
+# by list position — do NOT interleave PoPs here or forward/return diverge on failover.
+# Names are GENERIC (Primary/Secondary + circuit #); the city lives in the FQDN. NO '_' or
+# special chars (FortiSASE tunnel-config names reject them). network_id is unique PER PoP
+# (0 = 1st tunnel-config, 1 = 2nd); bor_node /32s are distinct = unique BGP peers.
+# -----------------------------------------------------------------------------
+pops_dual:
+  - id: primary1
+    name: Primary1
+    fqdn: ipsec-<tenant>-dfw-f3.prod.fortisase.com   # Primary PoP (e.g. Dallas), circuit 1
+    bor_node: 172.16.0.1                              # Tunnel-interface IP = iBGP peer (confirm on SASE)
+    community: "65001:10"                             # lp200 — most preferred
+    network_id: 0                                     # 1st tunnel-config on the Primary PoP
+    circuit: 1                                        # -> WAN1 (wan_port)
+  - id: primary2
+    name: Primary2
+    fqdn: ipsec-<tenant>-dfw-f3.prod.fortisase.com   # SAME Primary PoP, 2nd tunnel-config (cross-mesh)
+    bor_node: 172.16.16.1
+    community: "65001:20"                             # lp195 — same PoP, other circuit = voice failover
+    network_id: 1
+    circuit: 2                                        # cross -> WAN2 (wan2_port)
+  - id: secondary1
+    name: Secondary1
+    fqdn: ipsec-<tenant>-mia-f3.prod.fortisase.com   # Secondary PoP (e.g. Miami), circuit 2
+    bor_node: 172.16.8.1
+    community: "65001:30"                             # lp190
+    network_id: 0                                     # 1st tunnel-config on the Secondary PoP
+    circuit: 2                                        # -> WAN2 (wan2_port)
+  - id: secondary2
+    name: Secondary2
+    fqdn: ipsec-<tenant>-mia-f3.prod.fortisase.com   # SAME Secondary PoP, 2nd tunnel-config (cross-mesh)
+    bor_node: 172.16.24.1
+    community: "65001:40"                             # lp185
+    network_id: 1
+    circuit: 1                                        # cross -> WAN1 (wan_port)
+
+# -----------------------------------------------------------------------------
+# SLA PROBE POOL — one UNIQUE, ICMP-pingable, USA-based target per overlay.
+# WHY: FortiSASE PoP peers (bor_node) do NOT answer ICMP, and FortiOS rejects the
+# SAME detect server across two health-checks (-7). So each HC_<PoP> gets a distinct
+# entry from this pool by PoP order (index 0 = Primary, 1 = Secondary, ...). A PoP
+# with its own `probe:` overrides its slot. Keep >= number of on-ramps (max 20).
+# All entries verified as classic ICMP-responsive public resolvers in the USA.
+# -----------------------------------------------------------------------------
+# Top 4 land on the 4 dual-circuit HCs by order. UltraDNS/Neustar family first:
+# 64.6.64.6 is CONFIRMED reachable THROUGH the SASE egress (2026-08), so its anycast
+# siblings should be too. Public resolvers below (8.8.8.8/1.1.1.1/...) ping direct but
+# some do NOT answer through SASE egress - kept as lower-priority fallbacks. 9.9.9.9 removed.
+sla_probe_pool:
+  - "64.6.64.6"        # UltraDNS/Neustar  Sterling, VA   (CONFIRMED through SASE)
+  - "64.6.65.6"        # UltraDNS/Neustar  Sterling, VA
+  - "156.154.70.1"     # UltraDNS/Neustar  Sterling, VA
+  - "156.154.71.1"     # UltraDNS/Neustar  Sterling, VA
+  - "8.8.8.8"          # Google            Mountain View, CA
+  - "1.1.1.1"          # Cloudflare        San Francisco, CA
+  - "4.2.2.2"          # Level3            Dallas, TX
+  - "208.67.222.222"   # OpenDNS resolver1 San Francisco, CA
+  - "8.8.4.4"          # Google (2nd)      Mountain View, CA
+  - "149.112.112.112"  # Quad9 (2nd)       San Francisco, CA
+  - "4.2.2.1"          # Level3            Dallas, TX
+  - "208.67.220.220"   # OpenDNS resolver2 San Francisco, CA
+  - "4.2.2.3"          # Level3            Dallas, TX
+  - "4.2.2.4"          # Level3            Dallas, TX
+  - "8.26.56.26"       # Comodo            Charlotte, NC
+  - "8.20.247.20"      # Comodo            Charlotte, NC
+  - "74.82.42.42"      # Hurricane Electric Fremont, CA
+  - "209.244.0.3"      # Level3            Atlanta, GA
+  - "209.244.0.4"      # Level3            Atlanta, GA
+  - "4.2.2.6"          # Level3            Dallas, TX
+
+# -----------------------------------------------------------------------------
+# FEATURE TOGGLES — render optional blocks on/off.
+# -----------------------------------------------------------------------------
+features:
+  bgp_communities:
+    default: true
+    scope: tenant
+    help: "Tag LAN per-PoP + hub community-match (return-path symmetry / ECMP control).
+           Emitted as ONE integrated block inside the device config (prefix-list +
+           route-map + send-community on BOR; community-list + route-map-in on hub) —
+           NOT a separate script."
+  sla_failover:
+    default: true
+    scope: tenant
+    help: "Symmetric SLA-triggered return-path failover. Per-overlay health checks (HC_<PoP>,
+           one member each) drive BOTH the BOR_Private_Access steering rule (mode sla,
+           tie-break fib-best-match) AND the config-system-sdwan/config-neighbor bindings that
+           gate route-map-out-preferable — so a degraded on-ramp moves forward AND return
+           together. Adds RM_OUT_FAIL (fail community :64911) and retires the shared SIA_Health.
+           Auto-enables bgp_communities. Pair with the hub CL_VIA_FAILED rule (hub companion)."
+  bor_private_access:
+    default: false
+    scope: site
+    help: "Site-to-site private access: this branch must reach a private app behind ANOTHER
+           branch (NOT on the SPA hub). Anchors this site's private (RFC1918) path on the
+           SECONDARY on-ramp — flips the BOR_Private_Access service to Secondary-led (both
+           priority-members AND config-sla order) AND swaps the LAN communities so the hub
+           returns via Secondary. Keeps this site on a DIFFERENT node than default (Primary)
+           sites so the hub can bridge them. Needs sla_failover + bgp_communities (both default on)."
+  controlled_firmware:
+    default: true
+    scope: tenant
+    help: "config system fortiguard / set auto-firmware-upgrade disable (ZTP fleet)."
+  green_field:
+    default: true
+    scope: site
+    help: "Factory-reset prep so the script doesn't collide: on HARDWARE, delete the
+           default 'lan' virtual-switch (frees lan1..N for individual IPs); on all,
+           purge default firewall policies before adding ours. VMs skip the switch step."
+  dual_wan:
+    default: false
+    scope: site
+    help: "DUAL-ISP (dual-circuit) role. Renders the SEPARATE bor-dual template: 2 WAN
+           interfaces, 4 on-ramp tunnels (2 PoPs x 2 tunnel-configs, cross-meshed across the
+           circuits), 2 underlays. Forces bgp_communities + sla_failover on. Single-circuit
+           (off) uses the untouched bor template. Use 'Load Dual-ISP baseline' to pre-fill."
+  dual_active:
+    default: false
+    scope: site
+    help: "Dual-circuit steering mode. Off (default) = primary-backup (mode sla, preference
+           by LP order). On = active-active (mode load-balance, ECMP across healthy on-ramps).
+           Only meaningful when dual_wan is on."
+
+# =============================================================================
+# VARIABLES  (grouped for the form; `group` = form section)
+# =============================================================================
+variables:
+
+  # ---- Identity & Model -----------------------------------------------------
+  - key: role
+    label: Site role
+    group: Identity & Model
+    scope: site
+    type: enum
+    values: [bor, bor-spa]
+    required: true
+    help: "BOR Node (branch spoke) or BOR + SPA Hub (bridge)."
+  - key: platform
+    label: FortiGate model
+    group: Identity & Model
+    scope: site
+    type: enum
+    values: [vm, fgt-30g, fgt-50g, fgt-120g]
+    default: vm
+    required: true
+    help: "Selects the port-map (which physical port is WAN vs LAN)."
+  - key: site_id
+    label: Site ID (branch number)
+    group: Identity & Model
+    scope: site
+    type: int
+    default: 1
+    required: true
+    help: "Unique branch number for this site. Drives the per-branch BGP community
+           65001:(1000+ID) so every branch's LAN routes are individually identifiable
+           at the hub. Quick-start sets this for you; change it per branch."
+  - key: hostname
+    label: Hostname
+    group: Identity & Model
+    scope: site
+    type: string
+    required: true
+    validate: "^[A-Za-z0-9-]{1,63}$"
+    help: "e.g. spoke-1, hub-1. Also names the LAN firewall address object."
+  - key: device_alias
+    label: Device alias (fleet label)
+    group: Identity & Model
+    scope: site
+    type: string
+    default: "FortiGate-ARM64-AWS"
+    required: false
+
+  # ---- Management -----------------------------------------------------------
+  - key: timezone
+    label: Timezone
+    group: Management
+    scope: tenant
+    type: string
+    default: "US/Pacific"
+  - key: admin_sport
+    label: Admin GUI port
+    group: Management
+    scope: tenant
+    type: int
+    default: 10443
+    help: "Off 443 — IKE-over-TCP binds 443. Do not use 443."
+  - key: admintimeout
+    label: Admin idle timeout (min)
+    group: Management
+    scope: tenant
+    type: int
+    default: 480
+    advanced: true
+  - key: admin_password
+    label: Admin password
+    group: Secrets
+    scope: site
+    type: secret
+    secret: true
+    inject_at_deploy: true
+    help: "config system admin. POC: FortiSASE-OnRamp-2026! (same as AWS VMs)."
+  - key: seed_psk
+    label: Seed PSK (all tunnels)
+    group: Secrets
+    scope: tenant
+    type: secret
+    secret: true
+    inject_at_deploy: true
+    help: "POC: ONE PSK for every on-ramp (and the SPA fabric). Set to your FortiSASE BOR location PSK."
+
+  # ---- WAN ------------------------------------------------------------------
+  - key: wan_mode
+    label: WAN mode
+    group: WAN
+    scope: site
+    type: enum
+    values: [static, dhcp]
+    default: static
+    required: true
+    help: "static = enter IP/mask/gateway; dhcp = learned from ISP (common on branches)."
+  - key: wan_ip
+    label: WAN IP
+    group: WAN
+    scope: site
+    type: ipv4
+    show_if: "wan_mode == static"
+    required_if: "wan_mode == static"
+  - key: wan_mask
+    label: WAN mask
+    group: WAN
+    scope: site
+    type: netmask
+    default: 255.255.255.0
+    show_if: "wan_mode == static"
+  - key: wan_gateway
+    label: WAN gateway
+    group: WAN
+    scope: site
+    type: ipv4
+    show_if: "wan_mode == static"
+    required_if: "wan_mode == static"
+    help: "Static default route + SD-WAN underlay member gateway. (DHCP mode learns it.)"
+  - key: wan2_ip
+    label: WAN2 IP (dual-circuit)
+    group: WAN
+    scope: site
+    type: ipv4
+    show_if: "dual_wan == True"
+    help: "Dual-ISP only. Second circuit interface IP (vm: port2; 30G/50G: lan3)."
+  - key: wan2_mask
+    label: WAN2 mask
+    group: WAN
+    scope: site
+    type: netmask
+    default: 255.255.255.0
+    show_if: "dual_wan == True"
+  - key: wan2_gateway
+    label: WAN2 gateway (dual-circuit)
+    group: WAN
+    scope: site
+    type: ipv4
+    show_if: "dual_wan == True"
+    help: "Dual-ISP only. Second circuit gateway (static)."
+
+  # ---- LAN (port2) ----------------------------------------------------------
+  - key: lan_ip
+    label: LAN IP (port2 / gateway)
+    group: LAN
+    scope: site
+    type: ipv4
+    required: true
+    help: "The FortiGate's own LAN interface IP."
+  - key: lan_mask
+    label: LAN mask
+    group: LAN
+    scope: site
+    type: netmask
+    default: 255.255.255.0
+  - key: lan_subnet
+    label: LAN subnet (network)
+    group: LAN
+    scope: derived
+    type: ipv4
+    formula: "network(lan_ip, lan_mask)"
+    help: "Auto: used by the LAN firewall object, BGP network, and community prefix-list."
+  - key: advertised_networks
+    label: Extra LAN / VLAN networks to advertise
+    group: LAN
+    scope: site
+    type: list
+    default: []
+    help: "BGP 'config network' prefixes (CIDR). lan_subnet is advertised automatically; add each additional VLAN subnet here to advertise it too."
+
+  # ---- Bandwidth (per-site slice of the shared BOR pool) --------------------
+  # UP + DOWN are SEPARATE shaper objects so a site can be asymmetric. A shared shaper is
+  # ONE token bucket, so the cap is AGGREGATE across both on-ramps (a dual-active site can't
+  # exceed it). guaranteed 0 = pure ceiling (lets the 2 Gbps pool oversubscribe).
+  - key: site_bandwidth_mbps
+    label: Site speed limit (Mbps)
+    group: Bandwidth
+    scope: site
+    type: int
+    default: 100
+    help: "This site's internet speed limit through the BOR, applied to BOTH directions
+           (upload and download get the same limit). It is this site's slice of the shared
+           2 Gbps pool. Enter e.g. 100 for 100 Mbps; enter 0 for no limit. Keep the total of
+           all sites <= 2000."
+  - key: site_bandwidth_down_mbps
+    label: Different download speed? (Mbps, optional)
+    group: Bandwidth
+    scope: site
+    type: int
+    default: 0
+    advanced: true
+    help: "Leave at 0 for almost every site — the limit above already covers BOTH upload and
+           download. Only change this if the site's plan gives a FASTER download than upload
+           (e.g. 100 up / 500 down): put the download number here. 0 = same as the limit above."
+
+  # ---- BGP ------------------------------------------------------------------
+  - key: bgp_as
+    label: BGP AS
+    group: BGP
+    scope: tenant
+    type: int
+    default: 65001
+    help: "FortiSASE tenant ASN (iBGP)."
+  - key: router_id
+    label: BGP Router-ID
+    group: BGP
+    scope: site
+    type: ipv4
+    required: true
+    validate: "^10\\.30\\.1\\.(?!([1-6])$)([0-9]{1,3})$"
+    help: "Unique in 10.30.1.0/24 (avoid PoP-reserved .1-.6). e.g. .100, .101, hub .105."
+  - key: bgp_keepalive
+    label: BGP keepalive (s)
+    group: BGP
+    scope: tenant
+    type: int
+    default: 2
+    help: "Negotiated = min(local, BOR). 2/6 gave ~6s failover in-lab."
+  - key: bgp_holdtime
+    label: BGP holdtime (s)
+    group: BGP
+    scope: tenant
+    type: int
+    default: 6
+
+  # ---- SD-WAN SLA -----------------------------------------------------------
+  - key: sla_servers
+    label: Legacy SIA_Health probe servers (fallback only)
+    group: SD-WAN SLA
+    scope: tenant
+    type: list
+    advanced: true
+    default: ["8.8.8.8", "1.1.1.1"]
+    help: "ONLY used by the legacy single SIA_Health check (sla_failover OFF). The BOR on-ramp
+           health-checks (HC_<PoP>, sla_failover ON = default) draw UNIQUE, SASE-reachable probes
+           from `sla_probe_pool` instead — that's why a generated HC shows 64.6.64.6, not 8.8.8.8.
+           The hub now also uses sla_probe_pool. Leave this alone unless you disable sla_failover."
+  - key: sla_latency_threshold
+    label: Latency threshold (ms)
+    group: SD-WAN SLA
+    scope: tenant
+    type: int
+    default: 250
+  - key: sla_jitter_threshold
+    label: Jitter threshold (ms)
+    group: SD-WAN SLA
+    scope: tenant
+    type: int
+    default: 50
+  - key: sla_packetloss_threshold
+    label: Packet-loss threshold (%)
+    group: SD-WAN SLA
+    scope: tenant
+    type: int
+    default: 5
+
+  # ---- Routing / Bastion ----------------------------------------------------
+  - key: bastion_ip
+    label: Bastion / mgmt IP
+    group: Routing
+    scope: tenant
+    type: ipv4
+    default: 203.0.113.1
+    help: "Mgmt return path pinned out WAN (survives on-ramp default)."
+  - key: bastion_mask
+    label: Bastion mask
+    group: Routing
+    scope: tenant
+    type: netmask
+    default: 255.255.255.255
+  - key: mgmt_gateway
+    label: Mgmt next-hop gateway (DHCP WAN)
+    group: Routing
+    scope: site
+    type: ipv4
+    help: "Explicit next-hop for the bastion + trusted-host return routes. REQUIRED when the WAN is
+           DHCP (there is no static WAN gateway to inherit) — e.g. the ISP gateway. Leave blank on a
+           static WAN and the routes reuse the WAN gateway."
+  - key: mgmt_gateway2
+    label: Mgmt next-hop gateway — WAN2 (DHCP dual)
+    group: Routing
+    scope: site
+    type: ipv4
+    show_if: "dual_wan == True"
+    help: "Dual-ISP only. Explicit next-hop for the WAN2 bastion route when WAN2 is DHCP. Blank on a
+           static WAN2 reuses the WAN2 gateway."
+  - key: wan_dhcp_distance
+    label: DHCP WAN default-route distance
+    group: Routing
+    scope: site
+    type: int
+    default: 20
+    help: "Administrative distance stamped on the DHCP-learned default route (set on the WAN interface).
+           FortiOS defaults this to 5 — which BEATS the distance-20 floating fallback and hijacks the
+           on-ramp path. Keep at 20 so the underlay default is ECMP with the BOR/eBGP default rather
+           than overriding it. Only applied when the WAN is DHCP; static WANs ignore it."
+  - key: trusted_host_routes
+    label: Extra trusted-host return routes
+    group: Routing
+    scope: site
+    type: list
+    default: []
+    help: "Additional management / trusted-host subnets (CIDR) pinned back out the WAN,
+           one per row (+). The bastion above is always added; use this for extra admin
+           jump hosts or NOC subnets that must bypass the on-ramp default route."
+
+  # ---- IPsec baseline (advanced; tenant crypto) -----------------------------
+  - key: onramp_network_id
+    label: On-ramp network-id
+    group: IPsec
+    scope: tenant
+    type: int
+    default: 0
+    advanced: true
+    help: "MUST match FortiSASE (0)."
+  - key: onramp_proposal
+    label: On-ramp phase1/2 proposal
+    group: IPsec
+    scope: tenant
+    type: string
+    default: "aes256-sha256"
+    advanced: true
+  - key: onramp_dhgrp
+    label: On-ramp DH group
+    group: IPsec
+    scope: tenant
+    type: string
+    default: "5 14"
+    advanced: true
+
+  # ---- SPA FABRIC  (role = bor-spa ONLY) ------------------------------------
+  - key: hub_loopback
+    label: Hub loopback IP
+    group: SPA Fabric
+    scope: site
+    roles: [bor-spa]
+    type: ipv4
+    required: false
+    help: "OPTIONAL — blank = no loopback (default; unused in the current POC). If set (e.g. 10.123.123.5) it creates the SASE_Hub_Lo loopback + advertises it into the fabric."
+  - key: fabric_overlay
+    label: SPA fabric overlay (/24)
+    group: SPA Fabric
+    scope: site
+    roles: [bor-spa]
+    type: cidr
+    required: true
+    help: "UNIQUE per hub, e.g. 10.10.50.0/24. PoPs dial into this pool."
+  - key: fabric_hub_ip
+    label: Fabric hub tunnel IP
+    group: SPA Fabric
+    scope: derived
+    roles: [bor-spa]
+    formula: "host(fabric_overlay, 253)"          # 10.10.50.253
+  - key: fabric_hub_remote
+    label: Fabric hub remote-ip
+    group: SPA Fabric
+    scope: derived
+    roles: [bor-spa]
+    formula: "host(fabric_overlay, 254)"          # 10.10.50.254
+  - key: fabric_pool_start
+    label: Fabric dial-in pool start
+    group: SPA Fabric
+    scope: derived
+    roles: [bor-spa]
+    formula: "host(fabric_overlay, 1)"            # 10.10.50.1
+  - key: fabric_pool_end
+    label: Fabric dial-in pool end
+    group: SPA Fabric
+    scope: derived
+    roles: [bor-spa]
+    formula: "host(fabric_overlay, 252)"          # 10.10.50.252
+  - key: fabric_network_id
+    label: Fabric network-id
+    group: SPA Fabric
+    scope: tenant
+    roles: [bor-spa]
+    type: int
+    default: 1
+    advanced: true
+  - key: hub_proposal
+    label: Hub dial-in proposal
+    group: SPA Fabric
+    scope: tenant
+    roles: [bor-spa]
+    type: string
+    default: "aes256-sha256 aes256-sha384 aes256-sha512 aes128-sha256"
+    advanced: true
+    help: "Broad set for PoP negotiation interop."
+  - key: fabric_psk
+    label: SPA fabric PSK
+    group: Secrets
+    scope: site
+    roles: [bor-spa]
+    type: secret
+    secret: true
+    inject_at_deploy: true
+    help: "Must match the FortiSASE SPA connector pointed at this hub."
+
+# =============================================================================
+# CONSTANTS — fixed baseline emitted by the template, NEVER prompted. Listed for
+# reference only. Move any of these up into `variables:` if you ever need to expose it.
+# =============================================================================
+constants:
+  interface:       { mtu-override: enable, mtu: 9001 }
+  phase1:          { ike-version: 2, peertype: any, net-device: disable, mode-cfg: enable,
+                     transport: auto, fortinet-esp: enable, dpd: on-idle, network-overlay: enable }
+  bgp:             { ibgp-multipath: enable, recursive-next-hop: enable, scan-time: 5,
+                     graceful-restart: enable, advertisement-interval: 1, connect-timer: 1,
+                     next-hop-self: enable, soft-reconfiguration: enable, link-down-failover: enable }
+  bor_spa_bgp:     { additional-path: enable, additional-path-select: 4, route-reflector-client: enable }
+  static_default:  { distance: 20 }
+
+# =============================================================================
+# ROLE MATRIX — which sections each role renders (for the template + form logic)
+# =============================================================================
+role_matrix:
+  bor:                  # BOR Node (spoke)
+    onramp_bgp: true          # iBGP to the 2 BOR nodes (peers)
+    onramp_static_32: true    # /32 to each BOR node via its tunnel
+    spa_fabric: false
+    egress_only_bor: false
+  bor-spa:              # BOR + SPA Hub (bridge)
+    onramp_bgp: false         # EGRESS-ONLY: no BGP over the on-ramps
+    onramp_static_32: false   # no /32 to BOR nodes (reaches branches via fabric)
+    spa_fabric: true          # SASE_Hub dial-up + BGP route-reflector + loopback
+    egress_only_bor: true

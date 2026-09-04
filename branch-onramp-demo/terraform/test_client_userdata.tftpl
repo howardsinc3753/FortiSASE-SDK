@@ -1,0 +1,61 @@
+#!/bin/bash
+# Test-client bootstrap (Amazon Linux 2023). Clientless SASE/BOR endpoint.
+set -euo pipefail
+hostnamectl set-hostname "${hostname}"
+
+# Tools: throughput (iperf3), path (mtr/traceroute/tcpdump), DNS (bind-utils),
+# generic TCP/UDP (nmap-ncat). curl is preinstalled on AL2023.
+dnf -y install iperf3 mtr traceroute tcpdump bind-utils nmap-ncat tmux >/var/log/testclient-bootstrap.log 2>&1 || true
+
+# --- iperf3 server: site-to-site + throughput target (each client runs one) ---
+cat >/etc/systemd/system/iperf3.service <<'UNIT'
+[Unit]
+Description=iperf3 server (test-client throughput target)
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/usr/bin/iperf3 -s
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now iperf3
+
+# --- portal-check: does egress hit the FortiSASE SSO captive portal? ---
+# Uses plain HTTP so a captive portal can transparently intercept + 302-redirect
+# (HTTPS can't be intercepted without a cert warning). Shows the redirect target
+# (the SSO portal URL) and the public egress IP SASE presents once satisfied.
+cat >/usr/local/bin/portal-check <<'PC'
+#!/bin/bash
+URL="$${1:-http://neverssl.com}"
+echo "== HEAD $URL  (clientless egress: this box -> FortiGate -> BOR on-ramp -> SASE) =="
+curl -s -o /dev/null -D - --max-time 10 "$URL" | tr -d '\r' | grep -iE '^HTTP/|^location:' \
+  || echo "  no HTTP response (blocked, or no egress path yet)"
+echo
+echo "== public egress IP (what SASE presents to the internet) =="
+curl -s --max-time 10 https://ifconfig.me || echo "  blocked - captive-portal SSO likely not yet satisfied"
+echo
+PC
+chmod +x /usr/local/bin/portal-check
+
+# --- dl-speed: quick download-throughput check through the SASE egress ---
+cat >/usr/local/bin/dl-speed <<'DS'
+#!/bin/bash
+URL="$${1:-https://speed.cloudflare.com/__down?bytes=104857600}"
+echo "Downloading 100 MB via the BOR on-ramp ..."
+curl -s -o /dev/null -w "  %%{size_download} bytes in %%{time_total}s  =>  %%{speed_download} B/s\n" \
+  --max-time 120 "$URL" || echo "  failed (egress blocked?)"
+DS
+chmod +x /usr/local/bin/dl-speed
+
+cat >/etc/motd <<'MOTD'
+==========================================================================
+ Clientless SASE/BOR test-client (${hostname})
+   iperf3 -c <peer-client-ip>   site-to-site / throughput (peer runs iperf3 -s)
+   portal-check                 show SSO captive-portal redirect + egress IP
+   dl-speed                     100 MB download via the SASE on-ramp
+==========================================================================
+MOTD
+
+echo "test-client ${hostname} bootstrap complete" >>/var/log/testclient-bootstrap.log

@@ -1,0 +1,444 @@
+{# ==========================================================================
+   BOR NODE — DUAL-CIRCUIT (dual-ISP) FortiOS config template (Jinja2)
+   Separate from bor.conf.j2 (single-circuit stays byte-identical). Dual-circuit
+   ALWAYS uses per-overlay SLA failover + BGP communities, so those blocks are
+   unconditional here. Cross-mesh: each PoP has 2 tunnel-configs (net-ids), one
+   bound to each WAN, so a dead circuit still reaches both PoPs.
+   Context adds: wan2_port, wan2_ip/mask/gateway, and per-pop `circuit` (1|2) +
+   `network_id`. Emits in FortiOS dependency order (same as single-circuit).
+   ========================================================================== #}
+config system global
+    set hostname "{{ hostname }}"
+    set alias "{{ device_alias }}"
+    set timezone "{{ timezone }}"
+    set admin-sport {{ admin_sport }}
+    set admintimeout {{ admintimeout }}
+    set gui-auto-upgrade-setup-warning disable
+end
+config system admin
+    edit "admin"
+        set password "{{ admin_password }}"
+    next
+end
+{% if controlled_firmware %}config system fortiguard
+    set auto-firmware-upgrade disable
+end
+{% endif %}
+{% if green_field %}
+{# ZTP factory cleanup - run FIRST. Console / MGMT / FMG pre-run only. #}
+config firewall policy
+    purge
+y
+end
+{% if platform == 'fgt-120g' %}
+{# 120G: LAN port16 is a member of the factory "lan" soft-switch; clear members FIRST, then delete
+   (a switch / its DHCP server with members won't purge). Factory IDs: dhcp server 1, switch "lan".
+   Bare 'y' answers each purge prompt on a console paste; drop them if pushing via FMG. #}
+config system dhcp server
+    edit 1
+        config ip-range
+            purge
+y
+        end
+    next
+    delete 1
+end
+config system virtual-switch
+    edit "lan"
+        config port
+            purge
+y
+        end
+    next
+    delete "lan"
+end
+{% elif platform != 'vm' %}config system dhcp server
+    purge
+y
+end
+config firewall address
+    delete "lan"
+end
+config system virtual-switch
+    purge
+y
+end
+{% endif %}{% endif %}
+{# Dual-circuit: port1=WAN1, wan2_port=WAN2, lan_port=LAN. On a VM these resolve
+   to port1 / port2 / port3; on hardware, wan2_port is a repurposed data port (e.g. lan3). #}
+config system interface
+    edit "{{ wan_port }}"
+        set alias "WAN1"
+{% if wan_mode == 'static' %}        set ip {{ wan_ip }} {{ wan_mask }}
+{% else %}        set mode dhcp
+        set distance {{ wan_dhcp_distance | default(20) }}
+{% endif %}        set allowaccess ping https ssh fgfm
+        set role wan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+    edit "{{ wan2_port }}"
+        set alias "WAN2"
+{% if wan_mode == 'static' %}        set ip {{ wan2_ip }} {{ wan2_mask }}
+{% else %}        set mode dhcp
+        set distance {{ wan_dhcp_distance | default(20) }}
+{% endif %}        set allowaccess ping https ssh fgfm
+        set role wan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+    edit "{{ lan_port }}"
+        set alias "LAN"
+        set ip {{ lan_ip }} {{ lan_mask }}
+        set allowaccess ping https ssh
+        set role lan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+end
+
+config system zone
+    edit "LAN_ZONE"
+        set interface "{{ lan_port }}"
+        set intrazone allow
+    next
+end
+
+{# IPsec phase1 CREATES the BOR_* tunnels. Each pop binds to its circuit's WAN and its own
+   network-id (same PoP FQDN can host 2 tunnel-configs distinguished by network-id). #}
+config vpn ipsec phase1-interface
+{% for pop in pops %}{% set pwan = wan_port if pop.circuit == 1 else wan2_port %}    edit "BOR_{{ pop.name }}"
+        set type ddns
+        set interface "{{ pwan }}"
+        set ike-version 2
+        set peertype any
+        set net-device disable
+        set mode-cfg enable
+        set proposal {{ onramp_proposal }}
+        set dhgrp {{ onramp_dhgrp }}
+        set network-overlay enable
+        set network-id {{ pop.network_id | default(loop.index) }}
+        set transport auto
+        set fortinet-esp enable
+        set dpd on-idle
+        set remotegw-ddns "{{ pop.fqdn }}"
+        set psksecret {{ seed_psk }}
+    next
+{% endfor %}end
+
+config vpn ipsec phase2-interface
+{% for pop in pops %}    edit "BOR_{{ pop.name }}"
+        set phase1name "BOR_{{ pop.name }}"
+        set proposal {{ onramp_proposal }}
+        set dhgrp {{ onramp_dhgrp }}
+    next
+{% endfor %}end
+
+config firewall address
+    edit "{{ hostname }}-LAN"
+        set subnet {{ lan_subnet }} {{ lan_mask }}
+    next
+{% for pop in pops %}    edit "BOR_{{ pop.name }}_PUBLIC"
+        set type fqdn
+        set allow-routing enable
+        set fqdn "{{ pop.fqdn }}"
+    next
+{% endfor %}    edit "RFC1918_10"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+    edit "RFC1918_172"
+        set subnet 172.16.0.0 255.240.0.0
+    next
+    edit "RFC1918_192"
+        set subnet 192.168.0.0 255.255.0.0
+    next
+end
+config firewall addrgrp
+    edit "RFC1918"
+        set member "RFC1918_10" "RFC1918_172" "RFC1918_192"
+    next
+end
+
+config router static
+    edit 1
+{% if wan_mode == 'static' %}        set gateway {{ wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set distance 20
+        set device "{{ wan_port }}"
+        set comment "WAN1 floating default (fallback; primary via on-ramps)"
+    next
+    edit 2
+{% if wan_mode == 'static' %}        set gateway {{ wan2_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set distance 20
+        set device "{{ wan2_port }}"
+        set comment "WAN2 floating default (fallback; primary via on-ramps)"
+    next
+{% for pop in pops %}    edit {{ 5 + loop.index0 }}
+        set dst {{ pop.bor_node }} 255.255.255.255
+        set device "BOR_{{ pop.name }}"
+        set comment "BOR {{ pop.name }} node (BGP peer)"
+    next
+{% endfor %}{% for pop in pops %}{% set pwan = wan_port if pop.circuit == 1 else wan2_port %}{% set pgw = wan_gateway if pop.circuit == 1 else wan2_gateway %}    edit {{ 20 + loop.index0 }}
+        set dstaddr "BOR_{{ pop.name }}_PUBLIC"
+{% if wan_mode == 'static' %}        set gateway {{ pgw }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ pwan }}"
+        set comment "{{ pop.name }} BOR PoP public via {{ pwan }}"
+    next
+{% endfor %}    edit 10
+        set dst {{ bastion_ip }} {{ bastion_mask }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway or wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan_port }}"
+        set comment "Bastion / management return path (via WAN1)"
+    next
+    edit 11
+        set dst {{ bastion_ip }} {{ bastion_mask }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway2 or wan2_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan2_port }}"
+        set comment "Bastion / management return path (via WAN2)"
+    next
+{% for net in trusted_host_routes %}    edit {{ 30 + loop.index0 }}
+        set dst {{ net }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway or wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan_port }}"
+        set comment "Extra trusted-host return route ({{ loop.index }})"
+    next
+{% endfor %}end
+
+{# Communities BEFORE bgp: the neighbor route-map-out references these route-maps #}
+config router prefix-list
+    edit "PL_LAN_LOCAL"
+        config rule
+            edit 1
+                set prefix {{ lan_subnet }} {{ lan_mask }}
+            next
+        end
+    next
+end
+config router route-map
+{% for pop in pops %}    edit "RM_OUT_{{ pop.name|upper }}"
+        config rule
+            edit 1
+                set match-ip-address "PL_LAN_LOCAL"
+                set set-community "{{ pop.community }}"{% if site_community %} "{{ site_community }}"{% endif %}
+                {# spoke-side local-pref (fabric collapses to 1 best-path before the hub; community
+                   doesn't affect best-path) — derived from community, matches hub RM_FABRIC_IN. #}
+                set set-local-preference {{ pop.local_pref }}
+            next
+            edit 99
+            next
+        end
+    next
+{% endfor %}    edit "RM_OUT_FAIL"
+        config rule
+            edit 1
+                set match-ip-address "PL_LAN_LOCAL"
+                set set-community "{{ fail_community }}"{% if site_community %} "{{ site_community }}"{% endif %}
+                set set-local-preference {{ fail_local_pref }}
+            next
+            edit 99
+            next
+        end
+    next
+end
+config router bgp
+    set as {{ bgp_as }}
+    set router-id {{ router_id }}
+    set keepalive-timer {{ bgp_keepalive }}
+    set holdtime-timer {{ bgp_holdtime }}
+    set ibgp-multipath enable
+    set recursive-next-hop enable
+    set scan-time 5
+    set graceful-restart enable
+    config neighbor
+{% for pop in pops %}        edit "{{ pop.bor_node }}"
+            set interface "BOR_{{ pop.name }}"
+            set update-source "BOR_{{ pop.name }}"
+            set remote-as {{ bgp_as }}
+            set advertisement-interval 1
+            set connect-timer 1
+            set capability-graceful-restart enable
+            set link-down-failover enable
+            set next-hop-self enable
+            set soft-reconfiguration enable
+            set route-map-out "RM_OUT_FAIL"
+            set route-map-out-preferable "RM_OUT_{{ pop.name|upper }}"
+            set send-community both
+        next
+{% endfor %}    end
+    config network
+        edit 1
+            set prefix {{ lan_subnet }} {{ lan_mask }}
+        next
+{% for net in advertised_networks %}        edit {{ loop.index + 1 }}
+            set prefix {{ net }}
+        next
+{% endfor %}    end
+end
+
+config system sdwan
+    set status enable
+    config zone
+        edit "SDWAN_ZONE"
+        next
+        edit "Underlay_ZONE"
+        next
+    end
+    config members
+{% for pop in pops %}        edit {{ loop.index }}
+            set interface "BOR_{{ pop.name }}"
+            set zone "SDWAN_ZONE"
+        next
+{% endfor %}        edit {{ pops|length + 1 }}
+            set interface "{{ wan_port }}"
+            set zone "Underlay_ZONE"
+{% if wan_mode == 'static' %}            set gateway {{ wan_gateway }}
+{% endif %}        next
+        edit {{ pops|length + 2 }}
+            set interface "{{ wan2_port }}"
+            set zone "Underlay_ZONE"
+{% if wan_mode == 'static' %}            set gateway {{ wan2_gateway }}
+{% endif %}        next
+    end
+    {# per-overlay probe: one HC per on-ramp (member N). Unique pingable target per HC
+       (PoP peers don't answer ICMP; FortiOS rejects a shared detect server, -7). #}
+    config health-check
+{% for pop in pops %}        edit "HC_{{ pop.name }}"
+            set server "{{ pop.probe | default(sla_probe_pool[loop.index0], true) }}"
+            set failtime 2
+            set recoverytime 3
+            set update-static-route disable
+            set members {{ loop.index }}
+            config sla
+                edit 1
+                    set link-cost-factor latency jitter packet-loss
+                    set latency-threshold {{ sla_latency_threshold }}
+                    set jitter-threshold {{ sla_jitter_threshold }}
+                    set packetloss-threshold {{ sla_packetloss_threshold }}
+                next
+            end
+        next
+{% endfor %}    end
+    {# ACTIVATION: bind each BGP neighbor to its on-ramp's probe = symmetric failover. #}
+    config neighbor
+{% for pop in pops %}        edit "{{ pop.bor_node }}"
+            set member {{ loop.index }}
+            set health-check "HC_{{ pop.name }}"
+            set sla-id 1
+        next
+{% endfor %}    end
+end
+
+config firewall policy
+    edit 1
+        set name "LAN to BOR (SIA)"
+        set srcintf "LAN_ZONE"
+        set dstintf "SDWAN_ZONE"
+        set srcaddr "{{ hostname }}-LAN"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+    edit 2
+        set name "BOR to LAN (return)"
+        set srcintf "SDWAN_ZONE"
+        set dstintf "LAN_ZONE"
+        set srcaddr "all"
+        set dstaddr "{{ hostname }}-LAN"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+    edit 3
+        set name "LAN to Underlay (fallback)"
+        set srcintf "LAN_ZONE"
+        set dstintf "Underlay_ZONE"
+        set srcaddr "{{ hostname }}-LAN"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat enable
+        set logtraffic all
+    next
+end
+
+{% if shaper_up_mbps and shaper_up_mbps|int > 0 %}
+config firewall shaper traffic-shaper
+    edit "{{ shaper_up_mbps }}_MBPS_UP"
+        set guaranteed-bandwidth 0
+        set maximum-bandwidth {{ shaper_up_kbps }}
+        set bandwidth-unit kbps
+    next
+    edit "{{ shaper_down_mbps }}_MBPS_DOWN"
+        set guaranteed-bandwidth 0
+        set maximum-bandwidth {{ shaper_down_kbps }}
+        set bandwidth-unit kbps
+    next
+end
+config firewall shaping-policy
+    edit 1
+        set name "BOR_OUTBOUND_SHAPER"
+        set service "ALL"
+        set srcaddr "all"
+        set dstaddr "all"
+        set dstintf "SDWAN_ZONE"
+        set traffic-shaper "{{ shaper_up_mbps }}_MBPS_UP"
+        set traffic-shaper-reverse "{{ shaper_down_mbps }}_MBPS_DOWN"
+    next
+end
+{% endif %}
+{# SD-WAN service rules LAST. Default = primary-backup (mode sla, priority-member order =
+   STAY-ON-POP LP order: Primary1 > Primary2 > Secondary1 > Secondary2 — a circuit loss fails
+   to the SAME PoP's other circuit so a voice/session stays anchored). dual_active flips to
+   load-balance (ECMP across healthy on-ramps). Underlay_fallback = both underlays; NO
+   'set gateway/default' (the floating statics own fallback). #}
+config system sdwan
+    config service
+        edit 1
+            set name "BOR_Private_Access"
+{# bor_private_access forces SLA + Secondary-led even under dual_active: load-balancing the
+   private path would spread RFC1918 across the Primary PoP too and re-converge with default
+   sites (same-node hairpin). pa_members leads with the secondary-PoP tunnels (both circuits). #}
+            set mode {% if dual_active and not bor_private_access %}load-balance{% else %}sla{% endif %}
+
+            set dst "RFC1918"
+{% if not (dual_active and not bor_private_access) %}            {# BOR role: RFC1918 via DEFAULT route only -> cfg-order = deterministic anchor + pre-emptive failback #}
+            set tie-break cfg-order
+{% endif %}            set priority-members {% for m in pa_members %}{{ m.num }} {% endfor %}
+
+            config sla
+{% for m in pa_members %}                edit "HC_{{ m.name }}"
+                    set id 1
+                next
+{% endfor %}            end
+        next
+        edit 2
+            set name "INET_via_BOR"
+            set mode {% if dual_active %}load-balance{% else %}sla{% endif %}
+
+            set dst "all"
+{% if not dual_active %}            {# cfg-order only in primary-backup (sla) mode; load-balance deliberately spreads. #}
+            set tie-break cfg-order
+{% endif %}            set priority-members {% for pop in pops %}{{ loop.index }} {% endfor %}
+
+            config sla
+{% for pop in pops %}                edit "HC_{{ pop.name }}"
+                    set id 1
+                next
+{% endfor %}            end
+        next
+        edit 5
+            set name "Underlay_fallback"
+            set dst "all"
+            set priority-members {{ pops|length + 1 }} {{ pops|length + 2 }}
+        next
+    end
+end

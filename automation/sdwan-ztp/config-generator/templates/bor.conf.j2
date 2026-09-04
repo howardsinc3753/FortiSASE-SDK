@@ -1,0 +1,472 @@
+{# ==========================================================================
+   BOR NODE — FortiOS config template (Jinja2)  ·  Phase 1
+   Emits in FortiOS DEPENDENCY ORDER (see schema meta.emit_order):
+   global/admin -> PHYSICAL interfaces -> LAN zone -> IPsec phase1 (CREATES
+   tunnels) -> phase2 -> firewall address -> static -> communities -> BGP ->
+   SD-WAN base -> firewall policy -> SD-WAN service RULES (last).
+   Context contract: site vars + tenant vars + `pops` (list) + resolved
+   `wan_port`/`lan_port` (from platform) + `features`. `advertised_networks`
+   items are pre-formatted "ip mask". `lan_subnet` derived by the generator.
+   ========================================================================== #}
+config system global
+    set hostname "{{ hostname }}"
+    set alias "{{ device_alias }}"
+    set timezone "{{ timezone }}"
+    set admin-sport {{ admin_sport }}
+    set admintimeout {{ admintimeout }}
+    set gui-auto-upgrade-setup-warning disable
+end
+config system admin
+    edit "admin"
+        set password "{{ admin_password }}"
+    next
+end
+{% if controlled_firmware %}config system fortiguard
+    set auto-firmware-upgrade disable
+end
+{% endif %}
+{% if green_field %}
+{# ZTP factory cleanup - run FIRST. Console / MGMT / FMG pre-run only; do NOT run through a LAN
+   switch port (you'll cut yourself off). Purge DHCP BEFORE the switch (factory DHCP is bound to
+   it); virtual-switch purge is name-agnostic ('internal' or 'lan'). The bare 'y' lines answer the
+   'This operation will clear all table! (y/n)' prompt on a CONSOLE PASTE (must be column 0). If you
+   push via FMG and it reports 'unknown command y', FMG auto-confirms - drop the 'y' lines. #}
+config firewall policy
+    purge
+y
+end
+{% if platform == 'fgt-120g' %}
+{# 120G: our LAN port (port16) is a MEMBER of the factory "lan" soft-switch. A virtual-switch (and
+   its bound DHCP server) with members won't purge/delete, so CLEAR the members FIRST, then delete.
+   IDs are the 120G factory defaults (dhcp server 1, switch "lan"). The bare 'y' answers each purge
+   prompt on a console paste; drop the 'y' lines if you push via FMG. #}
+config system dhcp server
+    edit 1
+        config ip-range
+            purge
+y
+        end
+    next
+    delete 1
+end
+config system virtual-switch
+    edit "lan"
+        config port
+            purge
+y
+        end
+    next
+    delete "lan"
+end
+{% elif platform != 'vm' %}config system dhcp server
+    purge
+y
+end
+{# The factory firewall address "lan" is bound to the switch interface - virtual-switch purge fails
+   until it's removed. delete (single entry) does NOT prompt, so no 'y'. If your platform's LAN
+   switch/address is named "internal" instead of "lan", change the name below. #}
+config firewall address
+    delete "lan"
+end
+config system virtual-switch
+    purge
+y
+end
+{% endif %}{% endif %}
+config system interface
+    edit "{{ wan_port }}"
+        set alias "WAN"
+{% if wan_mode == 'static' %}        set ip {{ wan_ip }} {{ wan_mask }}
+{% else %}        set mode dhcp
+        set distance {{ wan_dhcp_distance | default(20) }}
+{% endif %}        set allowaccess ping https ssh fgfm
+        set role wan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+    edit "{{ lan_port }}"
+        set alias "LAN"
+        set ip {{ lan_ip }} {{ lan_mask }}
+        set allowaccess ping https ssh
+        set role lan
+{% if platform == 'vm' %}        set mtu-override enable
+        set mtu 9001
+{% endif %}    next
+end
+
+config system zone
+    edit "LAN_ZONE"
+        set interface "{{ lan_port }}"
+        set intrazone allow
+    next
+end
+
+{# IPsec phase1 CREATES the BOR_* tunnel interfaces — must precede any reference #}
+config vpn ipsec phase1-interface
+{% for pop in pops %}    edit "BOR_{{ pop.name }}"
+        set type ddns
+        set interface "{{ wan_port }}"
+        set ike-version 2
+        set peertype any
+        set net-device disable
+        set mode-cfg enable
+        set proposal {{ onramp_proposal }}
+        set dhgrp {{ onramp_dhgrp }}
+        set network-overlay enable
+        set network-id {{ onramp_network_id }}
+        set transport auto
+        set fortinet-esp enable
+        set dpd on-idle
+        set remotegw-ddns "{{ pop.fqdn }}"
+        set psksecret {{ seed_psk }}
+    next
+{% endfor %}end
+
+config vpn ipsec phase2-interface
+{% for pop in pops %}    edit "BOR_{{ pop.name }}"
+        set phase1name "BOR_{{ pop.name }}"
+        set proposal {{ onramp_proposal }}
+        set dhgrp {{ onramp_dhgrp }}
+    next
+{% endfor %}end
+
+config firewall address
+    edit "{{ hostname }}-LAN"
+        set subnet {{ lan_subnet }} {{ lan_mask }}
+    next
+{% for pop in pops %}    edit "BOR_{{ pop.name }}_PUBLIC"
+        set type fqdn
+        set allow-routing enable
+        set fqdn "{{ pop.fqdn }}"
+    next
+{% endfor %}{% if sla_failover %}    edit "RFC1918_10"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+    edit "RFC1918_172"
+        set subnet 172.16.0.0 255.240.0.0
+    next
+    edit "RFC1918_192"
+        set subnet 192.168.0.0 255.255.0.0
+    next
+{% endif %}end
+{% if sla_failover %}config firewall addrgrp
+    edit "RFC1918"
+        set member "RFC1918_10" "RFC1918_172" "RFC1918_192"
+    next
+end
+{% endif %}
+
+config router static
+    edit 1
+{% if wan_mode == 'static' %}        set gateway {{ wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set distance 20
+        set device "{{ wan_port }}"
+        set comment "Floating WAN default (fallback; primary via on-ramps)"
+    next
+{% for pop in pops %}    edit {{ 5 + loop.index0 }}
+        set dst {{ pop.bor_node }} 255.255.255.255
+        set device "BOR_{{ pop.name }}"
+        set comment "BOR {{ pop.name }} node (BGP peer)"
+    next
+{% endfor %}{% for pop in pops %}    edit {{ 20 + loop.index0 }}
+        set dstaddr "BOR_{{ pop.name }}_PUBLIC"
+{% if wan_mode == 'static' %}        set gateway {{ wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan_port }}"
+        set comment "{{ pop.name }} BOR PoP public via WAN"
+    next
+{% endfor %}    edit 10
+        set dst {{ bastion_ip }} {{ bastion_mask }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway or wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan_port }}"
+        set comment "Bastion / management return path (trusted host)"
+    next
+{% for net in trusted_host_routes %}    edit {{ 30 + loop.index0 }}
+        set dst {{ net }}
+{% if wan_mode == 'static' %}        set gateway {{ mgmt_gateway or wan_gateway }}
+{% else %}        set dynamic-gateway enable
+{% endif %}        set device "{{ wan_port }}"
+        set comment "Extra trusted-host return route ({{ loop.index }})"
+    next
+{% endfor %}end
+
+{# Communities BEFORE bgp: the neighbor route-map-out references these route-maps #}
+{% if bgp_communities %}config router prefix-list
+    edit "PL_LAN_LOCAL"
+        config rule
+            edit 1
+                set prefix {{ lan_subnet }} {{ lan_mask }}
+            next
+        end
+    next
+end
+config router route-map
+{% for pop in pops %}    edit "RM_OUT_{{ pop.name|upper }}"
+        config rule
+            edit 1
+                set match-ip-address "PL_LAN_LOCAL"
+                set set-community "{{ pop.community }}"{% if site_community %} "{{ site_community }}"{% endif %}
+                {# spoke-side local-pref: the FortiSASE fabric collapses the 2 advs to 1 best-path
+                   BEFORE the hub, and community doesn't affect best-path — so the SPOKE must set lp
+                   (derived from the community, matches the hub RM_FABRIC_IN) to win the fabric. #}
+                set set-local-preference {{ pop.local_pref }}
+            next
+            edit 99
+            next
+        end
+    next
+{% endfor %}{% if sla_failover %}    edit "RM_OUT_FAIL"
+        config rule
+            edit 1
+                set match-ip-address "PL_LAN_LOCAL"
+                set set-community "{{ fail_community }}"{% if site_community %} "{{ site_community }}"{% endif %}
+                set set-local-preference {{ fail_local_pref }}
+            next
+            edit 99
+            next
+        end
+    next
+{% endif %}end
+{% endif %}
+config router bgp
+    set as {{ bgp_as }}
+    set router-id {{ router_id }}
+    set keepalive-timer {{ bgp_keepalive }}
+    set holdtime-timer {{ bgp_holdtime }}
+    set ibgp-multipath enable
+    set recursive-next-hop enable
+    set scan-time 5
+    set graceful-restart enable
+    config neighbor
+{% for pop in pops %}        edit "{{ pop.bor_node }}"
+            set interface "BOR_{{ pop.name }}"
+            set update-source "BOR_{{ pop.name }}"
+            set remote-as {{ bgp_as }}
+            set advertisement-interval 1
+            set connect-timer 1
+            set capability-graceful-restart enable
+            set link-down-failover enable
+            set next-hop-self enable
+            set soft-reconfiguration enable
+{% if sla_failover %}            set route-map-out "RM_OUT_FAIL"
+            set route-map-out-preferable "RM_OUT_{{ pop.name|upper }}"
+            set send-community both
+{% elif bgp_communities %}            set route-map-out "RM_OUT_{{ pop.name|upper }}"
+            set send-community both
+{% endif %}        next
+{% endfor %}    end
+    config network
+        edit 1
+            set prefix {{ lan_subnet }} {{ lan_mask }}
+        next
+{% for net in advertised_networks %}        edit {{ loop.index + 1 }}
+            set prefix {{ net }}
+        next
+{% endfor %}    end
+end
+
+config system sdwan
+    set status enable
+    config zone
+        edit "SDWAN_ZONE"
+        next
+        edit "Underlay_ZONE"
+        next
+    end
+    config members
+{% for pop in pops %}        edit {{ loop.index }}
+            set interface "BOR_{{ pop.name }}"
+            set zone "SDWAN_ZONE"
+        next
+{% endfor %}        edit {{ pops|length + 1 }}
+            set interface "{{ wan_port }}"
+            set zone "Underlay_ZONE"
+{% if wan_mode == 'static' %}            set gateway {{ wan_gateway }}
+{% endif %}        next
+    end
+    {# health-check members MUST be explicit = the on-ramp members. An empty/defaulted
+       'members' becomes 0 (all members) and the SD-WAN service rule won't steer. Keep in
+       lock-step with the INET_via_BOR service priority-members below (both = the on-ramps). #}
+    config health-check
+{% if sla_failover %}{# per-overlay probe: one HC per on-ramp (member N) -> drives BOTH the
+   BOR_Private_Access rule AND the config-neighbor binding = symmetric failover.
+   Each HC needs a UNIQUE, pingable target: FortiSASE PoP peers don't answer ICMP, and FortiOS
+   rejects a detect server shared across health-checks ("...is duplicated in HC_x and HC_y", -7).
+   So probe a distinct entry from sla_probe_pool by PoP order; a PoP with its own `probe:` (e.g. an
+   internal DNS reachable through that overlay) overrides its slot. #}
+{% for pop in pops %}        edit "HC_{{ pop.name }}"
+            set server "{{ pop.probe | default(sla_probe_pool[loop.index0], true) }}"
+
+            set failtime 2
+            set recoverytime 3
+            set update-static-route disable
+            set members {{ loop.index }}
+            config sla
+                edit 1
+                    set link-cost-factor latency jitter packet-loss
+                    set latency-threshold {{ sla_latency_threshold }}
+                    set jitter-threshold {{ sla_jitter_threshold }}
+                    set packetloss-threshold {{ sla_packetloss_threshold }}
+                next
+            end
+        next
+{% endfor %}{% else %}        edit "SIA_Health"
+            set server {% for s in sla_servers %}"{{ s }}" {% endfor %}
+
+            set failtime 2
+            set recoverytime 3
+            set update-static-route disable
+            set members {% for pop in pops %}{{ loop.index }} {% endfor %}
+
+            config sla
+                edit 1
+                    set link-cost-factor latency jitter packet-loss
+                    set latency-threshold {{ sla_latency_threshold }}
+                    set jitter-threshold {{ sla_jitter_threshold }}
+                    set packetloss-threshold {{ sla_packetloss_threshold }}
+                next
+            end
+        next
+{% endif %}    end
+{% if sla_failover %}{# ACTIVATION: bind each BGP neighbor to its on-ramp's probe. Without this,
+   route-map-out-preferable stays inert. member N = on-ramp; sla-id 1 = the threshold SLA. #}
+    config neighbor
+{% for pop in pops %}        edit "{{ pop.bor_node }}"
+            set member {{ loop.index }}
+            set health-check "HC_{{ pop.name }}"
+            set sla-id 1
+        next
+{% endfor %}    end
+{% endif %}end
+
+config firewall policy
+    edit 1
+        set name "LAN to BOR (SIA)"
+        set srcintf "LAN_ZONE"
+        set dstintf "SDWAN_ZONE"
+        set srcaddr "{{ hostname }}-LAN"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+    edit 2
+        set name "BOR to LAN (return)"
+        set srcintf "SDWAN_ZONE"
+        set dstintf "LAN_ZONE"
+        set srcaddr "all"
+        set dstaddr "{{ hostname }}-LAN"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set logtraffic all
+    next
+    edit 3
+        set name "LAN to Underlay (fallback)"
+        set srcintf "LAN_ZONE"
+        set dstintf "Underlay_ZONE"
+        set srcaddr "{{ hostname }}-LAN"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat enable
+        set logtraffic all
+    next
+end
+
+{% if shaper_up_mbps and shaper_up_mbps|int > 0 %}
+{# Per-site BW allocation (shared 2 Gbps pool). SHARED shaper on the on-ramp tunnels caps
+   this site's BOR traffic in AGGREGATE across BOTH on-ramps (one token bucket per shaper,
+   so a dual-active site still can't exceed the cap). UP + DOWN are separate objects so a
+   site can be asymmetric. guaranteed 0 = pure ceiling (lets the 2 Gbps pool oversubscribe).
+   To change the cap, edit only these objects' maximum-bandwidth. site_bandwidth_mbps=0 skips
+   the whole block. dstintf = SDWAN_ZONE (the on-ramps; same name in both roles), created above. #}
+config firewall shaper traffic-shaper
+    edit "{{ shaper_up_mbps }}_MBPS_UP"
+        set guaranteed-bandwidth 0
+        set maximum-bandwidth {{ shaper_up_kbps }}
+        set bandwidth-unit kbps
+    next
+    edit "{{ shaper_down_mbps }}_MBPS_DOWN"
+        set guaranteed-bandwidth 0
+        set maximum-bandwidth {{ shaper_down_kbps }}
+        set bandwidth-unit kbps
+    next
+end
+config firewall shaping-policy
+    edit 1
+        set name "BOR_OUTBOUND_SHAPER"
+        set service "ALL"
+        set srcaddr "all"
+        set dstaddr "all"
+        set dstintf "SDWAN_ZONE"
+        set traffic-shaper "{{ shaper_up_mbps }}_MBPS_UP"
+        set traffic-shaper-reverse "{{ shaper_down_mbps }}_MBPS_DOWN"
+    next
+end
+{% endif %}
+{# SD-WAN service rules LAST. Underlay_fallback deliberately has NO 'set gateway/default
+   enable' — the floating static default (distance 20) owns the real fallback; enabling
+   them injects a competing default that hijacked the on-ramp path on live spokes (spoke-2).
+   Do NOT re-add. #}
+config system sdwan
+    config service
+{% if sla_failover %}        edit 1
+            set name "BOR_Private_Access"
+            set mode sla
+            set dst "RFC1918"
+            {# BOR role: RFC1918 resolves via the DEFAULT route only -> fib-best-match can't
+               disambiguate + won't pre-empt on overlay recovery. cfg-order = deterministic
+               anchor + pre-emptive failback (Daniel live test). #}
+            set tie-break cfg-order
+{# anchor-first: default Primary; bor_private_access flips pa_members so SECONDARY leads
+   (both priority-members AND config-sla order — the failback fix). #}
+            set priority-members {% for m in pa_members %}{{ m.num }} {% endfor %}
+
+            config sla
+{% for m in pa_members %}                edit "HC_{{ m.name }}"
+                    set id 1
+                next
+{% endfor %}            end
+        next
+        edit 2
+            set name "INET_via_BOR"
+            set mode sla
+            set dst "all"
+            {# cfg-order: among on-ramps meeting the SLA, pick them in config order (Primary=1
+               first, fail to Secondary=2). Default 'zone' is NOT deterministic. #}
+            set tie-break cfg-order
+            set priority-members {% for pop in pops %}{{ loop.index }} {% endfor %}
+
+            config sla
+{% for pop in pops %}                edit "HC_{{ pop.name }}"
+                    set id 1
+                next
+{% endfor %}            end
+        next
+        edit 5
+            set name "Underlay_fallback"
+            set dst "all"
+            set priority-members {{ pops|length + 1 }}
+        next
+{% else %}        edit 1
+            set name "INET_via_BOR"
+            set mode priority
+            set dst "all"
+            set health-check "SIA_Health"
+            set link-cost-factor packet-loss
+            set tie-break cfg-order
+            set priority-members {% for pop in pops %}{{ loop.index }} {% endfor %}
+
+        next
+        edit 4
+            set name "Underlay_fallback"
+            set dst "all"
+            set priority-members {{ pops|length + 1 }}
+        next
+{% endif %}    end
+end

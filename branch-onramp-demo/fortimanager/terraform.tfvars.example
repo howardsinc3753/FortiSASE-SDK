@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+# Deploys FMG INTO the existing spoke VPC — run the ../terraform spoke stack first.
+
+# --- Access (don't leave admin open to the world) ---
+admin_cidr = ["203.0.113.10/32"]     # YOUR public IP /32 (curl ifconfig.me)
+
+# --- Optional overrides (defaults shown) ---
+# aws_region        = "us-east-1"
+# availability_zone = "us-east-1a"      # match the spokes' AZ
+# aws_profile       = ""                # or set AWS_PROFILE env for SSO accounts
+# spoke_vpc_tag     = "sase-spoke-vpc"  # the VPC to deploy into (looked up by tag)
+# fmg_subnet_cidr   = "10.200.254.0/24" # dedicated mgmt subnet in the spoke VPC
+# fmg_version       = "7.6.7"
+# instance_type     = "m5.xlarge"       # 4 vCPU / 16 GiB. Bump to m5.2xlarge (8/32) for scale
+# root_volume_size  = 30
+# data_volume_size  = 200               # FMG DB/log disk on /dev/sdb (required)
+# fgfm_cidrs        = ["10.200.0.0/16", "172.16.8.0/21"]  # who may reach FGFM 541

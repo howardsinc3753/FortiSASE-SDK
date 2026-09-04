@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored (secrets).
+
+key_pair_name  = "my-ec2-keypair"              # an existing EC2 key pair in the region
+admin_password = "FortiSASE-OnRamp-2026!"      # match the config generator POC default
+admin_cidr     = "203.0.113.50/32"             # YOUR public IP /32  (curl ifconfig.me). RFC5737 placeholder here.
+
+# Optional overrides (defaults are fine for a lab):
+# aws_region   = "us-east-1"
+# fortios_ami  = "ami-0b7030b7e5c00882e"        # 7.6.6 BYOL ARM64 (us-east-1). Set your 7.6.7 AMI if desired.
+# instance_type = "t4g.small"
