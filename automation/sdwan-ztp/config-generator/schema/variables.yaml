@@ -54,7 +54,6 @@ platforms:
   vm:       { wan_port: port1, lan_port: port2, wan2_port: port2, lan_port_dual: port3 }
   fgt-30g:  { wan_port: wan,   lan_port: lan1,  wan2_port: lan3,  lan_port_dual: lan1 }
   fgt-50g:  { wan_port: wan,   lan_port: lan1,  wan2_port: lan3,  lan_port_dual: lan1 }
-  fgt-71f:  { wan_port: wan1,  lan_port: internal, wan2_port: wan2, lan_port_dual: internal }
   fgt-120g: { wan_port: port1, lan_port: port16, wan2_port: port2, lan_port_dual: port16 }  # LAN port16 = factory "lan" switch member (green-field deletes the switch)
 
 # -----------------------------------------------------------------------------

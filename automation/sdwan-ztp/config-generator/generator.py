@@ -175,7 +175,7 @@ FMG_CSV_HEADERS = [
     "POP1_FQDN", "POP2_FQDN", "POP1_PROBE", "POP2_PROBE",
 ]
 # platform -> blueprint suffix (NOT platform.upper(): fgt-30g -> 30G, not FGT-30G)
-_FMG_PLATFORM_SUFFIX = {"vm": "VM", "fgt-30g": "30G", "fgt-50g": "50G", "fgt-120g": "120G", "fgt-71f": "71F"}
+_FMG_PLATFORM_SUFFIX = {"vm": "VM", "fgt-30g": "30G", "fgt-50g": "50G", "fgt-120g": "120G"}
 # tenant-scope CSV column -> variables.yaml key (blanked when value == schema default)
 _FMG_TENANT_OPTIONAL = {
     "TIMEZONE": "timezone", "ADMIN_SPORT": "admin_sport", "ADMIN_TIMEOUT": "admintimeout",
