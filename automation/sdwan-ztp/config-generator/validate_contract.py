@@ -45,7 +45,8 @@ def _check_naming_drift(gen):
     obj = re.compile(r'(edit "(BOR_|HC_|RM_OUT_)|set (interface|update-source|device|dstaddr'
                      r'|health-check|route-map-out[a-z-]*|phase1name) ")')
     leaks = []
-    for site_key, pops_key in (("site-1_bor", "pops"), ("site-4_bor-dual", "pops_dual")):
+    for site_key, pops_key in (("site-1_bor", "pops"), ("site-4_bor-dual", "pops_dual"),
+                               ("site-5_bor-spa", "pops"), ("site-7_bor-spa-dual", "pops_dual")):
         site = dict(gen.SITES[site_key])
         pops = copy.deepcopy(schema[pops_key])
         for p in pops:

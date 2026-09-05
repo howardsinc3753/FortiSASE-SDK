@@ -98,7 +98,7 @@ config vpn ipsec phase1-interface
         set proposal {{ hub_proposal }}
         set psksecret {{ seed_psk }}
     next
-{% for pop in pops %}    edit "BOR_{{ pop.name }}"
+{% for pop in pops %}    edit "BOR_{{ pop.role_label }}"
         set type ddns
         set interface "{{ wan_port }}"
         set ike-version 2
@@ -124,8 +124,8 @@ config vpn ipsec phase2-interface
         set dhgrp 20 15 14
         set keylifeseconds 86400
     next
-{% for pop in pops %}    edit "BOR_{{ pop.name }}"
-        set phase1name "BOR_{{ pop.name }}"
+{% for pop in pops %}    edit "BOR_{{ pop.role_label }}"
+        set phase1name "BOR_{{ pop.role_label }}"
         set proposal {{ onramp_proposal }}
         set dhgrp {{ onramp_dhgrp }}
     next
@@ -147,7 +147,7 @@ config firewall address
 {% if hub_loopback %}    edit "SASE_Hub-Loopback"
         set subnet {{ hub_loopback }} 255.255.255.255
     next
-{% endif %}{% for pop in pops %}    edit "BOR_{{ pop.name }}_PUBLIC"
+{% endif %}{% for pop in pops %}    edit "BOR_{{ pop.role_label }}_PUBLIC"
         set type fqdn
         set allow-routing enable
         set fqdn "{{ pop.fqdn }}"
@@ -173,7 +173,7 @@ config router static
         set comment "Floating WAN default (fallback; SIA default via on-ramps)"
     next
 {% for pop in pops %}    edit {{ 20 + loop.index0 }}
-        set dstaddr "BOR_{{ pop.name }}_PUBLIC"
+        set dstaddr "BOR_{{ pop.role_label }}_PUBLIC"
 {% if wan_mode == 'static' %}        set gateway {{ wan_gateway }}
 {% else %}        set dynamic-gateway enable
 {% endif %}        set device "{{ wan_port }}"
@@ -297,7 +297,7 @@ config system sdwan
     end
     config members
 {% for pop in pops %}        edit {{ loop.index }}
-            set interface "BOR_{{ pop.name }}"
+            set interface "BOR_{{ pop.role_label }}"
             set zone "SDWAN_ZONE"
         next
 {% endfor %}        edit {{ pops|length + 1 }}
