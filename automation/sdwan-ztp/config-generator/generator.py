@@ -101,6 +101,15 @@ def build_context(site, schema):
     # order AND the LAN communities (secondary tunnels take the hub-preferred LP slots). Generalizes
     # the single-circuit 2-way swap to a PoP-group reorder (PoP key = name minus trailing digits, so
     # Dallas1/Dallas2 group as "Dallas", Primary/Secondary as themselves).
+    # PRIMARY_POP (per-site; bor-single v1.1): 2 => prefer the SECONDARY PoP for ALL traffic
+    # (route-maps + private + INET) so single-circuit sites can be split across the two PoPs to
+    # share the tenant's aggregate SASE bandwidth. Reuses the bor_private_access swap engine
+    # (route-map community/LP + private-access member order) and additionally flips INET egress.
+    # Scoped to bor-single (role==bor, single-circuit) for v1.1; dual/SPA follow in v1.2.
+    _full_flip = (ctx.get("role") == "bor" and not ctx.get("dual_wan")
+                  and str(ctx.get("primary_pop", 1)).strip() == "2")
+    if _full_flip:
+        ctx["bor_private_access"] = True
     pa = list(enumerate(ctx["pops"], start=1))                 # original LP order
     if ctx.get("bor_private_access") and len(ctx["pops"]) >= 2:
         pref_comms = [p["community"] for p in ctx["pops"]]     # original LP order (:10,:20,:30,:40)
@@ -112,6 +121,10 @@ def build_context(site, schema):
             for i, (_, p) in enumerate(pa):
                 p["community"] = pref_comms[i]                 # secondary tunnels take the top LP slots
     ctx["pa_members"] = [{"num": n, "name": p["name"]} for n, p in pa]
+    # INET egress member order: follows the private-access flip ONLY on a full PRIMARY_POP flip;
+    # a private-only bor_private_access leaves INET on the primary (pops order) unchanged.
+    ctx["inet_members"] = ctx["pa_members"] if _full_flip else [
+        {"num": n, "name": p["name"]} for n, p in enumerate(ctx["pops"], start=1)]
     # Spoke-side BGP local-pref per on-ramp, DERIVED from the community (matches the hub RM_FABRIC_IN):
     # community AS:(10*k) -> lp 200-(k-1)*5 (:10->200, :20->195, :30->190, :40->185), fail -> 50.
     # WHY: the FortiSASE BOR fabric collapses a spoke's two LAN advertisements to ONE best-path BEFORE
@@ -219,6 +232,8 @@ def fmg_headers_for(ctx):
         h += list(_FMG_DUAL_PERDEVICE)
     if ctx.get("role") == "bor-spa":
         h += list(_FMG_SPA_PERDEVICE) + list(_FMG_SPA_TENANT_OPTIONAL)
+    if ctx.get("role") == "bor" and not ctx.get("dual_wan"):   # bor-single only (v1.1)
+        h += ["PRIMARY_POP"]
     return h
 
 
@@ -279,6 +294,8 @@ def fmg_csv_row(ctx, serial, schema):
             row[col] = s(ctx.get(key))
         for col, key in _FMG_SPA_TENANT_OPTIONAL.items():
             row[col] = blank_if_default(key)
+    if ctx.get("role") == "bor" and not ctx.get("dual_wan"):   # bor-single only (v1.1)
+        row["PRIMARY_POP"] = s(ctx.get("primary_pop") or 1)
     return row
 
 

@@ -228,6 +228,18 @@ variables:
     values: [bor, bor-spa]
     required: true
     help: "BOR Node (branch spoke) or BOR + SPA Hub (bridge)."
+  - key: primary_pop
+    label: Primary on-ramp PoP
+    group: Routing
+    scope: site
+    type: enum
+    values: [1, 2]
+    default: 1
+    show_if: "role == bor"
+    help: "Which BOR on-ramp a SINGLE-circuit site prefers for ALL traffic (private + internet).
+           1 = primary PoP (default). 2 = secondary PoP — flips the whole site to the secondary
+           BOR so the fleet can be split across both PoPs to share the tenant's aggregate SASE
+           bandwidth. Single-circuit BOR only (v1.1)."
   - key: platform
     label: FortiGate model
     group: Identity & Model

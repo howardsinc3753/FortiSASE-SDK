@@ -440,10 +440,10 @@ config system sdwan
             {# cfg-order: among on-ramps meeting the SLA, pick them in config order (Primary=1
                first, fail to Secondary=2). Default 'zone' is NOT deterministic. #}
             set tie-break cfg-order
-            set priority-members {% for pop in pops %}{{ loop.index }} {% endfor %}
+            set priority-members {% for m in inet_members %}{{ m.num }} {% endfor %}
 
             config sla
-{% for pop in pops %}                edit "HC_{{ pop.name }}"
+{% for m in inet_members %}                edit "HC_{{ m.name }}"
                     set id 1
                 next
 {% endfor %}            end
@@ -460,7 +460,7 @@ config system sdwan
             set health-check "SIA_Health"
             set link-cost-factor packet-loss
             set tie-break cfg-order
-            set priority-members {% for pop in pops %}{{ loop.index }} {% endfor %}
+            set priority-members {% for m in inet_members %}{{ m.num }} {% endfor %}
 
         next
         edit 4

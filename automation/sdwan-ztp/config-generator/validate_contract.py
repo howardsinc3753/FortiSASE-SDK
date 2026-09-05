@@ -70,6 +70,8 @@ def main():
         # ---- check 2: catalog per-role csv fields == columns (minus structural) ----
         def applies(mv):
             a = mv.get("applies_to", "all")
+            if isinstance(a, list):          # explicit role-id list, e.g. [bor-single]
+                return rid in a
             return a == "all" or (a == "dual" and is_dual) or (a == "spa" and is_spa)
 
         cat_cols = {m["csv"] for name, m in meta.items() if m.get("csv") and applies(m)}
@@ -88,7 +90,7 @@ def main():
         return 1
 
     counts = {rid: len(base_cols) + len(r.get("csv_columns_added", [])) for rid, r in roles.items()}
-    print("contract OK — App export matches contract for all roles.")
+    print(f"contract OK (schema_version {c.get('schema_version', '?')}) — App export matches contract for all roles.")
     print("  column counts: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
     return 0
 
