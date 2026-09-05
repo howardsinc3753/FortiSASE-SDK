@@ -103,7 +103,7 @@ end
 
 {# IPsec phase1 CREATES the BOR_* tunnel interfaces — must precede any reference #}
 config vpn ipsec phase1-interface
-{% for pop in pops %}    edit "BOR_{{ pop.name }}"
+{% for pop in pops %}    edit "BOR_{{ pop.role_label }}"
         set type ddns
         set interface "{{ wan_port }}"
         set ike-version 2
@@ -123,8 +123,8 @@ config vpn ipsec phase1-interface
 {% endfor %}end
 
 config vpn ipsec phase2-interface
-{% for pop in pops %}    edit "BOR_{{ pop.name }}"
-        set phase1name "BOR_{{ pop.name }}"
+{% for pop in pops %}    edit "BOR_{{ pop.role_label }}"
+        set phase1name "BOR_{{ pop.role_label }}"
         set proposal {{ onramp_proposal }}
         set dhgrp {{ onramp_dhgrp }}
     next
@@ -134,7 +134,7 @@ config firewall address
     edit "{{ hostname }}-LAN"
         set subnet {{ lan_subnet }} {{ lan_mask }}
     next
-{% for pop in pops %}    edit "BOR_{{ pop.name }}_PUBLIC"
+{% for pop in pops %}    edit "BOR_{{ pop.role_label }}_PUBLIC"
         set type fqdn
         set allow-routing enable
         set fqdn "{{ pop.fqdn }}"
@@ -166,11 +166,11 @@ config router static
     next
 {% for pop in pops %}    edit {{ 5 + loop.index0 }}
         set dst {{ pop.bor_node }} 255.255.255.255
-        set device "BOR_{{ pop.name }}"
+        set device "BOR_{{ pop.role_label }}"
         set comment "BOR {{ pop.name }} node (BGP peer)"
     next
 {% endfor %}{% for pop in pops %}    edit {{ 20 + loop.index0 }}
-        set dstaddr "BOR_{{ pop.name }}_PUBLIC"
+        set dstaddr "BOR_{{ pop.role_label }}_PUBLIC"
 {% if wan_mode == 'static' %}        set gateway {{ wan_gateway }}
 {% else %}        set dynamic-gateway enable
 {% endif %}        set device "{{ wan_port }}"
@@ -203,7 +203,7 @@ config router static
     next
 end
 config router route-map
-{% for pop in pops %}    edit "RM_OUT_{{ pop.name|upper }}"
+{% for pop in pops %}    edit "RM_OUT_{{ pop.role_label|upper }}"
         config rule
             edit 1
                 set match-ip-address "PL_LAN_LOCAL"
@@ -241,8 +241,8 @@ config router bgp
     set graceful-restart enable
     config neighbor
 {% for pop in pops %}        edit "{{ pop.bor_node }}"
-            set interface "BOR_{{ pop.name }}"
-            set update-source "BOR_{{ pop.name }}"
+            set interface "BOR_{{ pop.role_label }}"
+            set update-source "BOR_{{ pop.role_label }}"
             set remote-as {{ bgp_as }}
             set advertisement-interval 1
             set connect-timer 1
@@ -251,9 +251,9 @@ config router bgp
             set next-hop-self enable
             set soft-reconfiguration enable
 {% if sla_failover %}            set route-map-out "RM_OUT_FAIL"
-            set route-map-out-preferable "RM_OUT_{{ pop.name|upper }}"
+            set route-map-out-preferable "RM_OUT_{{ pop.role_label|upper }}"
             set send-community both
-{% elif bgp_communities %}            set route-map-out "RM_OUT_{{ pop.name|upper }}"
+{% elif bgp_communities %}            set route-map-out "RM_OUT_{{ pop.role_label|upper }}"
             set send-community both
 {% endif %}        next
 {% endfor %}    end
@@ -277,7 +277,7 @@ config system sdwan
     end
     config members
 {% for pop in pops %}        edit {{ loop.index }}
-            set interface "BOR_{{ pop.name }}"
+            set interface "BOR_{{ pop.role_label }}"
             set zone "SDWAN_ZONE"
         next
 {% endfor %}        edit {{ pops|length + 1 }}
@@ -296,7 +296,7 @@ config system sdwan
    rejects a detect server shared across health-checks ("...is duplicated in HC_x and HC_y", -7).
    So probe a distinct entry from sla_probe_pool by PoP order; a PoP with its own `probe:` (e.g. an
    internal DNS reachable through that overlay) overrides its slot. #}
-{% for pop in pops %}        edit "HC_{{ pop.name }}"
+{% for pop in pops %}        edit "HC_{{ pop.role_label }}"
             set server "{{ pop.probe | default(sla_probe_pool[loop.index0], true) }}"
 
             set failtime 2
@@ -335,7 +335,7 @@ config system sdwan
     config neighbor
 {% for pop in pops %}        edit "{{ pop.bor_node }}"
             set member {{ loop.index }}
-            set health-check "HC_{{ pop.name }}"
+            set health-check "HC_{{ pop.role_label }}"
             set sla-id 1
         next
 {% endfor %}    end
@@ -428,7 +428,7 @@ config system sdwan
             set priority-members {% for m in pa_members %}{{ m.num }} {% endfor %}
 
             config sla
-{% for m in pa_members %}                edit "HC_{{ m.name }}"
+{% for m in pa_members %}                edit "HC_{{ m.role_label }}"
                     set id 1
                 next
 {% endfor %}            end
@@ -443,7 +443,7 @@ config system sdwan
             set priority-members {% for m in inet_members %}{{ m.num }} {% endfor %}
 
             config sla
-{% for m in inet_members %}                edit "HC_{{ m.name }}"
+{% for m in inet_members %}                edit "HC_{{ m.role_label }}"
                     set id 1
                 next
 {% endfor %}            end

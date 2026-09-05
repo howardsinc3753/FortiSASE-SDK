@@ -33,6 +33,26 @@ def _role_flags(app_key):
     return {"role": app_key["role"], "dual_wan": bool(app_key.get("dual_wan"))}
 
 
+def _check_naming_drift(gen):
+    """Anti-drift guard: object names must be ROLE-based (Primary/Secondary), never inherit a
+    PoP's display identity (identity is tenant-specific — DFW/NY/Ashburn — so a NOC must read
+    the same names across every tenant). Render bor-single with a sentinel-named PoP; fail if
+    the sentinel leaks into any object name (tunnel / HC / route-map / address / iface / device)."""
+    import copy
+    import re
+    schema = gen.load_schema()
+    site = dict(gen.SITES["site-1_bor"])
+    pops = copy.deepcopy(schema["pops"])
+    sentinel = "ZZIDENTITYZZ"
+    for p in pops:
+        p["name"] = sentinel
+    site["pops"] = pops
+    conf = gen.render(site, schema)
+    obj = re.compile(r'(edit "(BOR_|HC_|RM_OUT_)|set (interface|update-source|device|dstaddr'
+                     r'|health-check|route-map-out[a-z-]*|phase1name) ")')
+    return [l.strip() for l in conf.splitlines() if obj.search(l) and sentinel in l]
+
+
 def main():
     try:
         import yaml
@@ -84,6 +104,11 @@ def main():
                 f"        column-without-catalog-var: {sorted(miss) or '-'}\n"
                 f"        catalog-var-not-in-columns: {sorted(extra) or '-'}"
             )
+
+    leaks = _check_naming_drift(gen)
+    if leaks:
+        errors.append("[naming-drift] object names inherited PoP identity (must be role-based "
+                      "Primary/Secondary):\n" + "\n".join("        " + l for l in leaks[:8]))
 
     if errors:
         print("CONTRACT DRIFT:\n" + "\n".join(errors), file=sys.stderr)

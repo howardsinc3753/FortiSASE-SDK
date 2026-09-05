@@ -70,6 +70,15 @@ def build_context(site, schema):
     # leak back into the caller's values["pops"] or the shared schema dict).
     _pops_src = site.get("pops") or (schema["pops_dual"] if ctx.get("dual_wan") else schema["pops"])
     ctx["pops"] = [dict(p) for p in _pops_src]
+    # OBJECT names are ROLE-based (Primary/Secondary), NOT PoP-identity. PoP identity is
+    # tenant-specific (DFW/NY/Ashburn/...), so tunnels/HCs/route-maps/addresses use a STABLE
+    # positional role label the NOC reads the same across every tenant. pop["name"] stays the
+    # DISPLAY identity (comments/descriptions only). Anti-drift: validate_contract.py asserts
+    # object names never inherit pop["name"] (render with an identity name, expect role names).
+    _role_labels = (["Primary1", "Primary2", "Secondary1", "Secondary2"] if ctx.get("dual_wan")
+                    else ["Primary", "Secondary"])
+    for _i, _p in enumerate(ctx["pops"]):
+        _p["role_label"] = _role_labels[_i] if _i < len(_role_labels) else f"PoP{_i + 1}"
     # SLA probe pool: one UNIQUE, pingable target per overlay. PoP peers don't answer ICMP and
     # FortiOS rejects a detect server shared across health-checks, so each HC_<PoP> draws a distinct
     # slot from this pool by PoP order (a PoP's own `probe:` overrides its slot in the template).
@@ -120,11 +129,11 @@ def build_context(site, schema):
             pa = secondary + primary
             for i, (_, p) in enumerate(pa):
                 p["community"] = pref_comms[i]                 # secondary tunnels take the top LP slots
-    ctx["pa_members"] = [{"num": n, "name": p["name"]} for n, p in pa]
+    ctx["pa_members"] = [{"num": n, "name": p["name"], "role_label": p["role_label"]} for n, p in pa]
     # INET egress member order: follows the private-access flip ONLY on a full PRIMARY_POP flip;
     # a private-only bor_private_access leaves INET on the primary (pops order) unchanged.
     ctx["inet_members"] = ctx["pa_members"] if _full_flip else [
-        {"num": n, "name": p["name"]} for n, p in enumerate(ctx["pops"], start=1)]
+        {"num": n, "name": p["name"], "role_label": p["role_label"]} for n, p in enumerate(ctx["pops"], start=1)]
     # Spoke-side BGP local-pref per on-ramp, DERIVED from the community (matches the hub RM_FABRIC_IN):
     # community AS:(10*k) -> lp 200-(k-1)*5 (:10->200, :20->195, :30->190, :40->185), fail -> 50.
     # WHY: the FortiSASE BOR fabric collapses a spoke's two LAN advertisements to ONE best-path BEFORE
