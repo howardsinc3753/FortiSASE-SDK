@@ -115,16 +115,16 @@ def build_context(site, schema):
     # share the tenant's aggregate SASE bandwidth. Reuses the bor_private_access swap engine
     # (route-map community/LP + private-access member order) and additionally flips INET egress.
     # Scoped to bor-single (role==bor, single-circuit) for v1.1; dual/SPA follow in v1.2.
-    _full_flip = (ctx.get("role") == "bor" and not ctx.get("dual_wan")
-                  and str(ctx.get("primary_pop", 1)).strip() == "2")
+    _full_flip = (ctx.get("role") == "bor"
+                  and str(ctx.get("primary_pop", 1)).strip() == "2")   # bor-single (v1.1) + bor-dual (v1.2)
     if _full_flip:
         ctx["bor_private_access"] = True
     pa = list(enumerate(ctx["pops"], start=1))                 # original LP order
     if ctx.get("bor_private_access") and len(ctx["pops"]) >= 2:
         pref_comms = [p["community"] for p in ctx["pops"]]     # original LP order (:10,:20,:30,:40)
-        primary_key = str(ctx["pops"][0]["name"]).rstrip("0123456789")   # PoP of the top pref (e.g. Dallas)
-        secondary = [x for x in pa if str(x[1]["name"]).rstrip("0123456789") != primary_key]
-        primary = [x for x in pa if str(x[1]["name"]).rstrip("0123456789") == primary_key]
+        primary_key = str(ctx["pops"][0]["role_label"]).rstrip("0123456789")   # role group (Primary), identity-proof
+        secondary = [x for x in pa if str(x[1]["role_label"]).rstrip("0123456789") != primary_key]
+        primary = [x for x in pa if str(x[1]["role_label"]).rstrip("0123456789") == primary_key]
         if secondary:                                          # only if a distinct 2nd PoP exists
             pa = secondary + primary
             for i, (_, p) in enumerate(pa):
@@ -241,7 +241,7 @@ def fmg_headers_for(ctx):
         h += list(_FMG_DUAL_PERDEVICE)
     if ctx.get("role") == "bor-spa":
         h += list(_FMG_SPA_PERDEVICE) + list(_FMG_SPA_TENANT_OPTIONAL)
-    if ctx.get("role") == "bor" and not ctx.get("dual_wan"):   # bor-single only (v1.1)
+    if ctx.get("role") == "bor":   # bor-single (v1.1) + bor-dual (v1.2)
         h += ["PRIMARY_POP"]
     return h
 
@@ -303,7 +303,7 @@ def fmg_csv_row(ctx, serial, schema):
             row[col] = s(ctx.get(key))
         for col, key in _FMG_SPA_TENANT_OPTIONAL.items():
             row[col] = blank_if_default(key)
-    if ctx.get("role") == "bor" and not ctx.get("dual_wan"):   # bor-single only (v1.1)
+    if ctx.get("role") == "bor":   # bor-single (v1.1) + bor-dual (v1.2)
         row["PRIMARY_POP"] = s(ctx.get("primary_pop") or 1)
     return row
 

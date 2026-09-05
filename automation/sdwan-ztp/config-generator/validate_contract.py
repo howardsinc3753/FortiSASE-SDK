@@ -41,16 +41,20 @@ def _check_naming_drift(gen):
     import copy
     import re
     schema = gen.load_schema()
-    site = dict(gen.SITES["site-1_bor"])
-    pops = copy.deepcopy(schema["pops"])
     sentinel = "ZZIDENTITYZZ"
-    for p in pops:
-        p["name"] = sentinel
-    site["pops"] = pops
-    conf = gen.render(site, schema)
     obj = re.compile(r'(edit "(BOR_|HC_|RM_OUT_)|set (interface|update-source|device|dstaddr'
                      r'|health-check|route-map-out[a-z-]*|phase1name) ")')
-    return [l.strip() for l in conf.splitlines() if obj.search(l) and sentinel in l]
+    leaks = []
+    for site_key, pops_key in (("site-1_bor", "pops"), ("site-4_bor-dual", "pops_dual")):
+        site = dict(gen.SITES[site_key])
+        pops = copy.deepcopy(schema[pops_key])
+        for p in pops:
+            p["name"] = sentinel
+        site["pops"] = pops
+        conf = gen.render(site, schema)
+        leaks += ["[" + site_key + "] " + l.strip()
+                  for l in conf.splitlines() if obj.search(l) and sentinel in l]
+    return leaks
 
 
 def main():
