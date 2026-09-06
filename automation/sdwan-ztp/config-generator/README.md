@@ -45,6 +45,18 @@ streamlit run app.py                   # the SE form (http://localhost:8501)
 | **FortiSASE Tenant Status** | `http://localhost:8501/FortiSASE_Tenant_Status` | Read-only dashboard — paste FortiSASE **API creds** → green-lights for **BGP / SPA / BOR** + public-IP→PoP mapping |
 | **MSSP Deploy** | `http://localhost:8501/MSSP_Deploy` | Point-and-fire **FortiManager** provisioning — create ADOMs, import devices, install. Needs the **FortiManager-AI-SDK** (see `SETUP.md`) |
 
+## Roles & key features
+Pick a **role** + **model**; the generator renders the matching FortiOS config + FMG-import CSV.
+
+| Role | What it is |
+|---|---|
+| **BOR Node** — single / dual circuit | Branch spoke: 1 or 2 WANs, IPsec overlays to two FortiSASE PoPs |
+| **BOR + SPA Hub** — single / dual | Hub that terminates the SPA fabric + relays BOR overlays for site-to-site private access |
+
+- **Alt-primary (`Primary on-ramp PoP`)** — a per-site choice (POP1 default / POP2). Set **POP2** to flip a whole **spoke** site's traffic (private *and* internet) to the **secondary** BOR node, so you can split a fleet across both PoPs and share the tenant's aggregate SASE bandwidth. Rides straight through config → CSV → FMG install. *(Spoke roles only — SPA hubs pin to primary; a hub's BOR on-ramps are outbound-only and don't run BGP.)*
+- **Role-based object naming** — tunnels, route-maps, health-checks, and address objects use stable **role** names (`BOR_Primary` / `BOR_Secondary`, `RM_FABRIC_IN`, …), never tenant-specific PoP identity (Dallas / NY / Ashburn), so a NOC reads them the same across every tenant. PoP identity stays in comments only. A build-time drift guard fails loud if identity ever leaks into an object name.
+- **Placeholder guard** — the CSV import pre-flight rejects a blank or placeholder (`<…>`) PoP FQDN with a clear *"enter the real FortiSASE BOR PoP FQDN"* message, before anything reaches FortiManager.
+
 To change ANY field/section, follow **`SKILL-READ-FIRST_MACD.md`** (schema-first).
 
 ## Acceptance gate for Phase 0→1

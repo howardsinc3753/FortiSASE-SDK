@@ -104,7 +104,7 @@ Open <http://localhost:8501>. Three pages in the left sidebar:
 
 | Page | Needs FMG? | What it does |
 |---|---|---|
-| 🛰️ **Config Generator** (home) | No | Fill a per-site form → validated FortiOS **BOR** / **BOR+SPA** config → download `.conf` **and** an FMG-import CSV |
+| 🛰️ **Config Generator** (home) | No | Fill a per-site form → validated FortiOS **BOR** / **BOR+SPA** config → download `.conf` **and** an FMG-import CSV. Per-site **Primary on-ramp PoP** (POP1/POP2) flips a spoke to the secondary BOR to split a fleet across PoPs; object names are role-based (`BOR_Primary`/`Secondary`) so a NOC reads them the same across tenants |
 | 📊 **FortiSASE Tenant Status** | No (FortiSASE API creds) | Read-only dashboard: BGP / SPA / BOR green-lights + PoP mapping |
 | 🚀 **MSSP Deploy** | **Yes** (Steps 1b + 3) | Point-and-fire FMG: create a customer ADOM, import model devices from a CSV, install — each with a dry-run/preview first |
 
