@@ -49,10 +49,10 @@ meta:
 # all BGP/IPsec/SD-WAN logic is identical across models.
 # -----------------------------------------------------------------------------
 # wan2_port / lan_port_dual are used ONLY for the dual-circuit (dual-ISP) role.
-# vm dual: port1=WAN1, port2=WAN2, port3=LAN. 30G/50G dual: repurpose lan3 as WAN2, LAN stays lan1.
+# vm dual: port1=WAN1, port2=WAN2, port3=LAN. 30G dual: WAN2=lan1, LAN=lan2 (30G has NO lan3). 50G dual: WAN2=lan3, LAN=lan1.
 platforms:
   vm:       { wan_port: port1, lan_port: port2, wan2_port: port2, lan_port_dual: port3 }
-  fgt-30g:  { wan_port: wan,   lan_port: lan1,  wan2_port: lan3,  lan_port_dual: lan1 }
+  fgt-30g:  { wan_port: wan,   lan_port: lan1,  wan2_port: lan1,  lan_port_dual: lan2 }
   fgt-50g:  { wan_port: wan,   lan_port: lan1,  wan2_port: lan3,  lan_port_dual: lan1 }
   fgt-120g: { wan_port: port1, lan_port: port16, wan2_port: port2, lan_port_dual: port16 }  # LAN port16 = factory "lan" switch member (green-field deletes the switch)
 
@@ -351,7 +351,7 @@ variables:
     scope: site
     type: ipv4
     show_if: "dual_wan == True"
-    help: "Dual-ISP only. Second circuit interface IP (vm: port2; 30G/50G: lan3)."
+    help: "Dual-ISP only. Second circuit interface IP (vm: port2; 30G: lan1; 50G: lan3)."
   - key: wan2_mask
     label: WAN2 mask
     group: WAN

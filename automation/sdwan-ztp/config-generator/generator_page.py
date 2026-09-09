@@ -23,7 +23,7 @@ _TIMEZONES = sorted(zoneinfo.available_timezones())
 # Selectable physical interfaces per platform, for the LAN-interface picker.
 PLATFORM_PORTS = {
     "vm":       ["port1", "port2", "port3", "port4"],
-    "fgt-30g":  ["wan", "lan1", "lan2", "lan3"],
+    "fgt-30g":  ["wan", "lan1", "lan2", "a"],
     "fgt-50g":  ["wan", "lan1", "lan2", "lan3"],
     "fgt-120g": [f"port{i}" for i in range(1, 17)] + ["x1", "x2", "x3", "x4"] + [f"port{i}" for i in range(17, 25)],
 }
