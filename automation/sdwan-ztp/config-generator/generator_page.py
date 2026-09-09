@@ -498,9 +498,13 @@ if is_dual:
 edited = st.data_editor(
     pop_seed, num_rows="dynamic", use_container_width=True, key="pops_editor", column_config=_colcfg)
 pops = edited.to_dict("records") if hasattr(edited, "to_dict") else [dict(r) for r in edited]
-# auto-assign BGP communities by row order (:10/:20/:30/:40 = the hub LP order)
+# auto-assign BGP communities by row order (:10/:20/:30/:40 = the hub LP order). The AS MUST be the
+# entered BGP AS so it matches the hub's RM_FABRIC_IN community-list
+# (bor-spa*.conf.j2: `set match "{{ bgp_as }}:{{ 10*k }}"`). Hardcoding 65001 silently broke
+# return-path steering for any tenant whose BGP AS != 65001.
+_comm_as = int(values.get("bgp_as") or 65001)
 for i, p in enumerate(pops):
-    p["community"] = f"65001:{10 * (i + 1)}"
+    p["community"] = f"{_comm_as}:{10 * (i + 1)}"
     # normalize optional probe cell: blank/NaN -> "" so the template falls back to the pool
     pr = p.get("probe")
     p["probe"] = str(pr).strip() if pr and str(pr).strip().lower() != "nan" else ""
