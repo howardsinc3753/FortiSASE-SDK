@@ -198,6 +198,27 @@ def widget(v, key):
     return st.text_input(label, value=str(default or ""), placeholder=ph, help=help_, key=key)
 
 
+def _fmt_ok(val, typ):
+    """Format-check an IP-ish field. typ: ipv4 | netmask | cidr. Rejects whitespace-padded/malformed
+    values. The App previously only regex-checked fields carrying an explicit `validate`, so a bare
+    `type: ipv4/netmask/cidr` slipped through green (e.g. '10.200.110', or a trailing-space IP)."""
+    s = str(val)
+    if s.strip() != s:
+        return False
+    try:
+        if typ == "ipv4":
+            return ipaddress.ip_address(s).version == 4
+        if typ == "netmask":
+            m = ipaddress.ip_address(s)
+            return m.version == 4 and "01" not in bin(int(m))[2:].zfill(32)  # contiguous 1s only
+        if typ == "cidr":
+            ipaddress.ip_network(s, strict=False)
+            return True
+    except ValueError:
+        return False
+    return True  # non-IP type -> not this validator's job
+
+
 def validate(values, role):
     errs = []
     for v in VARS:
@@ -208,6 +229,8 @@ def validate(values, role):
             errs.append(f"**{v['label']}** is required")
         elif val and v.get("validate") and not re.match(v["validate"], str(val)):
             errs.append(f"**{v['label']}** — `{val}` doesn't match the expected format")
+        elif val and v.get("type") in ("ipv4", "netmask", "cidr") and not _fmt_ok(val, v["type"]):
+            errs.append(f"**{v['label']}** — `{val}` is not a valid {v['type']}")
     # mgmt_gateway must be ON the WAN subnet (static WAN only): an off-subnet next-hop on a
     # `set device <wan>` static route is unreachable, so the bastion/mgmt return route goes
     # INACTIVE (silent mgmt lockout). On DHCP mgmt_gateway is ignored (dynamic-gateway), so skip.
@@ -226,7 +249,7 @@ def validate(values, role):
                                     f"next-hop on a `set device` WAN route is unreachable, so the route goes "
                                     f"inactive. Use a gateway inside {net}, or blank it to reuse the WAN gateway.")
                 except ValueError:
-                    pass  # malformed IP/mask already flagged by the per-field format validators above
+                    pass  # a malformed IP/mask is flagged by the per-field type-format validators above (_fmt_ok)
     return errs
 
 
@@ -242,6 +265,8 @@ def field_state(v, role, cur):
     if (v.get("required") or v.get("required_if")) and val in (None, "", []):
         return "incomplete"
     if val and v.get("validate") and not re.match(v["validate"], str(val)):
+        return "invalid"
+    if val and v.get("type") in ("ipv4", "netmask", "cidr") and not _fmt_ok(val, v["type"]):
         return "invalid"
     return "ready"
 
