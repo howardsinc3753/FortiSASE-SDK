@@ -72,7 +72,7 @@ def _run(name, args, timeout=120):
                         f"FortiManager-AI-SDK checkout and restart the app.")
     try:
         r = subprocess.run([sys.executable, str(tp), *[str(a) for a in args]],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         raise ToolError(f"'{name}' timed out after {timeout}s — FortiManager unreachable?")
     out = (r.stdout or "").strip()
@@ -315,7 +315,7 @@ def _exec_runner(name, params, timeout=600):
         json.dump(params, tf)
         tf.close()
         r = subprocess.run([sys.executable, str(_RUNNER), str(tp), tf.name],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         raise ToolError(f"'{name}' timed out after {timeout}s.")
     finally:
@@ -359,7 +359,7 @@ def adom_init(host, adom, tenant_config=None, create=True, dry_run=False):
         args.append("--dry-run")
     try:
         r = subprocess.run([sys.executable, str(tp), *args],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     except subprocess.TimeoutExpired:
         raise ToolError("adom-init timed out after 300s.")
     finally:
@@ -409,7 +409,7 @@ def adom_init_stream(host, adom, tenant_config=None, create=True, dry_run=False)
     try:
         proc = subprocess.Popen([sys.executable, "-u", str(tp), *args],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1)
+                                text=True, encoding="utf-8", errors="replace", bufsize=1)
     except OSError as e:
         raise ToolError(f"Couldn't launch adom-init: {e}")
     try:
