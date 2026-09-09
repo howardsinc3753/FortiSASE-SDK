@@ -65,6 +65,18 @@ def build_context(site, schema):
             raise ValueError(f"platform {ctx['platform']} has TBD dual-circuit port names — fill them in schema")
     elif "TBD" in (ctx["wan_port"], ctx["lan_port"]):
         raise ValueError(f"platform {ctx['platform']} has TBD port names — fill them in schema")
+    # Ports MUST be distinct. A duplicate (e.g. a LAN override == wan2_port on the remapped 30G) makes
+    # FortiOS silently double-edit one interface — the later `edit` wins, WAN2 loses its IP and the
+    # circuit-2 tunnels ride a LAN-addressed port. Catch it here, not at install.
+    _pairs = [("WAN", ctx["wan_port"]), ("LAN", ctx["lan_port"])]
+    if ctx.get("dual_wan"):
+        _pairs.append(("WAN2", ctx["wan2_port"]))
+    _seen = {}
+    for _role, _p in _pairs:
+        if _p in _seen:
+            raise ValueError(f"port '{_p}' is assigned to both {_seen[_p]} and {_role} — WAN / WAN2 / "
+                             f"LAN must be distinct interfaces. Fix the platform port-map or the site override.")
+        _seen[_p] = _role
     # 5. PoPs (tenant objects) — form/values may override; dual uses the cross-mesh pops_dual
     # COPY the pops (we may mutate pop["community"] below for bor_private_access; must not
     # leak back into the caller's values["pops"] or the shared schema dict).
