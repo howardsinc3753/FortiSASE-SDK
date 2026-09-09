@@ -265,6 +265,20 @@ def validate_import_rows(rows):
                                   "FortiSASE BOR PoP FQDN for your tenant (from Secure Private Access / "
                                   "your BOR location in the FortiSASE portal) before importing. "
                                   "A placeholder means the config is incomplete and will not install."))
+        # Failover sanity: identical PoP endpoints. Same FQDN on both on-ramps = valid config but NO
+        # failover (advisory). Same PROBE = FortiOS -7 duplicate-detect-server -> the install FAILS.
+        _p1 = str(r.get("POP1_FQDN", "")).strip().lower()
+        _p2 = str(r.get("POP2_FQDN", "")).strip().lower()
+        if _p1 and _p2 and _p1 == _p2:
+            issues.append((i, "POP1_FQDN and POP2_FQDN are identical -> both on-ramps land on the SAME "
+                              "PoP, so there is NO failover. If that's deliberate (lab), ignore; "
+                              "otherwise set distinct Primary/Secondary PoP FQDNs."))
+        _pr1 = str(r.get("POP1_PROBE", "")).strip().lower()
+        _pr2 = str(r.get("POP2_PROBE", "")).strip().lower()
+        if _pr1 and _pr2 and _pr1 == _pr2:
+            issues.append((i, "POP1_PROBE and POP2_PROBE are identical -> FortiOS rejects a duplicate "
+                              "SLA detect server (-7), so the install FAILS. Use a distinct probe per "
+                              "on-ramp (or leave blank to auto-assign)."))
     return issues
 
 
