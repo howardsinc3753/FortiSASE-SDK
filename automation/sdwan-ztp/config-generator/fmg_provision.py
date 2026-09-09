@@ -142,6 +142,89 @@ def list_adom_devices(host, adom):
             for d in (st.get("data") or [])]
 
 
+def list_all_devices(host):
+    """READ-ONLY. Every device managed by this FMG across ALL ADOMs (the root DVM table).
+    A serial is registered ONCE in the device manager, so this is how we tell whether a CSV serial
+    already lives somewhere before trying to import it into an ADOM. -> [{name, sn, platform}]."""
+    import importlib
+    sdk_dir = FMG_SDK_DIR / "sdk"
+    if str(sdk_dir) not in sys.path:
+        sys.path.insert(0, str(sdk_dir))
+    try:
+        fmc = importlib.import_module("fortimanager_client")
+    except Exception as e:  # noqa: BLE001
+        raise ToolError(f"Couldn't load the FMG client from {sdk_dir}:\n{e}")
+    try:
+        c = fmc.FortiManagerClient(host=str(host))
+        r = c.get("/dvmdb/device", fields=["name", "sn", "platform_str"])
+    except Exception as e:  # noqa: BLE001
+        raise ToolError(f"global device list: {e}")
+    st = (r.get("result", [{}])[0] or {})
+    code = (st.get("status") or {}).get("code")
+    if code not in (0, None):
+        raise ToolError(f"global device list: {(st.get('status') or {}).get('message')}")
+    return [{"name": d.get("name"), "sn": d.get("sn"), "platform": d.get("platform_str")}
+            for d in (st.get("data") or [])]
+
+
+def locate_serials(host, serials, target_adom):
+    """ADOM-aware import pre-flight (the 'wrong-ADOM' guard). FortiManager registers a serial ONCE
+    across the device manager, so importing a serial into any ADOM other than its home ADOM fails.
+    Classify where each serial already lives:
+      new        — not managed by this FMG → safe to import into target_adom
+      in_target  — already in the selected ADOM → re-import is idempotent (re-bind)
+      elsewhere  — managed in a DIFFERENT ADOM (named) → importing here WILL fail; target that ADOM
+    -> {sn: {"state": new|in_target|elsewhere, "adom": <home adom or None>}}. Read-only.
+
+    Both source lists (target-ADOM + global DVM) MUST be trustworthy — every classification is an
+    intersection of the two, so soft-failing either into an empty set produces wrong answers (F2:
+    a swallowed target-ADOM ToolError misclassified in-target serials as 'elsewhere', and the
+    naming scan below skips target_adom so it could not recover). We propagate the ToolError
+    instead; the caller retries or renders a legitimate error."""
+    serials = [str(s).strip() for s in (serials or []) if str(s).strip()]
+    out = {}
+    if not serials:
+        return out
+    # Fail-fast on either read (F2): NO try/except — a soft-fail into an empty set here would
+    # corrupt every classification (the two lists are intersected below).
+    target_sns = {d["sn"] for d in list_adom_devices(host, target_adom) if d.get("sn")}
+    managed = {d["sn"] for d in list_all_devices(host) if d.get("sn")}
+    unresolved = []
+    for sn in serials:
+        if sn in target_sns:
+            out[sn] = {"state": "in_target", "adom": target_adom}
+        elif sn in managed:
+            out[sn] = {"state": "elsewhere", "adom": None}
+            unresolved.append(sn)
+        else:
+            out[sn] = {"state": "new", "adom": None}
+    # Name the home ADOM for conflicts. device_count is an unreliable meta field (see
+    # list_adom_devices' docstring: "fresher than adom-list's device_count") and adom-list can
+    # soft-fail — so DON'T gate the scan on it (F1). Scan every non-target ADOM, using device_count
+    # only to ORDER the scan populated-first, with early-exit once all conflicts are named.
+    if unresolved:
+        try:
+            _al = adom_list(host)
+        except ToolError:
+            _al = {}
+        _adoms = [] if _al.get("success") is False else (_al.get("adoms") or [])
+        _cands = sorted((a for a in _adoms if a.get("name") and a.get("name") != target_adom),
+                        key=lambda a: (a.get("device_count") or 0), reverse=True)
+        for a in _cands:
+            _name = a.get("name")
+            try:
+                sns = {d["sn"] for d in list_adom_devices(host, _name) if d.get("sn")}
+            except ToolError:
+                continue
+            for sn in list(unresolved):
+                if sn in sns:
+                    out[sn]["adom"] = _name
+                    unresolved.remove(sn)
+            if not unresolved:
+                break
+    return out
+
+
 def validate_import_rows(rows):
     """Pre-flight a device CSV BEFORE import — catch blank fields that would break the install with
     a cryptic Jinja 'undefined' error (the exact class that bites hand-edited CSVs). Conditional
